@@ -95,3 +95,10 @@ target_link_libraries(PointerLab PRIVATE
     psapi
     dbghelp
 )
+
+add_custom_command(TARGET PointerLab POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:PointerLab>/resources/fonts"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${imgui_SOURCE_DIR}/misc/fonts/Roboto-Medium.ttf"
+        "${imgui_SOURCE_DIR}/misc/fonts/Cousine-Regular.ttf"
+        "$<TARGET_FILE_DIR:PointerLab>/resources/fonts/")

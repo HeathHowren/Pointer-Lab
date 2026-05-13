@@ -340,55 +340,84 @@ void UiApp::render() {
 }
 
 void UiApp::applyStyle() {
+    ImGuiIO& io = ImGui::GetIO();
+    const auto fontsDir = infra::Paths::fontsDir();
+    const auto roboto  = (fontsDir / "Roboto-Medium.ttf").string();
+    const auto cousine = (fontsDir / "Cousine-Regular.ttf").string();
+    io.Fonts->AddFontFromFileTTF(roboto.c_str(), 15.0f);
+    monoFont_ = io.Fonts->AddFontFromFileTTF(cousine.c_str(), 14.0f);
+    if (!monoFont_) monoFont_ = io.FontDefault;
+
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowPadding = ImVec2(12.0f, 10.0f);
-    style.FramePadding = ImVec2(8.0f, 5.0f);
-    style.ItemSpacing = ImVec2(8.0f, 7.0f);
-    style.ItemInnerSpacing = ImVec2(6.0f, 5.0f);
-    style.WindowRounding = 9.0f;
-    style.ChildRounding = 8.0f;
-    style.FrameRounding = 5.0f;
-    style.PopupRounding = 7.0f;
-    style.GrabRounding = 5.0f;
-    style.TabRounding = 6.0f;
+    style.WindowPadding     = ImVec2(12.0f, 10.0f);
+    style.FramePadding      = ImVec2(8.0f, 5.0f);
+    style.ItemSpacing       = ImVec2(8.0f, 7.0f);
+    style.ItemInnerSpacing  = ImVec2(6.0f, 5.0f);
+    style.WindowRounding    = 9.0f;
+    style.ChildRounding     = 8.0f;
+    style.FrameRounding     = 5.0f;
+    style.PopupRounding     = 7.0f;
+    style.GrabRounding      = 5.0f;
+    style.TabRounding       = 6.0f;
     style.ScrollbarRounding = 6.0f;
-    style.WindowBorderSize = 1.0f;
-    style.ChildBorderSize = 1.0f;
-    style.FrameBorderSize = 0.0f;
+    style.WindowBorderSize  = 1.0f;
+    style.ChildBorderSize   = 1.0f;
+    style.FrameBorderSize   = 0.0f;
+    style.IndentSpacing     = 14.0f;
+    style.ScrollbarSize     = 12.0f;
+    style.GrabMinSize       = 8.0f;
 
     auto& colors = style.Colors;
-    colors[ImGuiCol_WindowBg] = colorFromBytes(18, 22, 27);
-    colors[ImGuiCol_ChildBg] = colorFromBytes(22, 27, 33);
-    colors[ImGuiCol_PopupBg] = colorFromBytes(25, 30, 37);
-    colors[ImGuiCol_Border] = colorFromBytes(55, 65, 75);
-    colors[ImGuiCol_FrameBg] = colorFromBytes(31, 38, 47);
+    colors[ImGuiCol_WindowBg]       = colorFromBytes(18, 22, 27);
+    colors[ImGuiCol_ChildBg]        = colorFromBytes(22, 27, 33);
+    colors[ImGuiCol_PopupBg]        = colorFromBytes(25, 30, 37);
+    colors[ImGuiCol_Border]         = colorFromBytes(55, 65, 75);
+    colors[ImGuiCol_FrameBg]        = colorFromBytes(31, 38, 47);
     colors[ImGuiCol_FrameBgHovered] = colorFromBytes(41, 52, 63);
-    colors[ImGuiCol_FrameBgActive] = colorFromBytes(50, 63, 76);
-    colors[ImGuiCol_TitleBg] = colorFromBytes(15, 19, 24);
-    colors[ImGuiCol_TitleBgActive] = colorFromBytes(28, 36, 44);
-    colors[ImGuiCol_MenuBarBg] = colorFromBytes(13, 17, 21);
-    colors[ImGuiCol_Button] = colorFromBytes(39, 57, 68);
-    colors[ImGuiCol_ButtonHovered] = colorFromBytes(54, 79, 94);
-    colors[ImGuiCol_ButtonActive] = colorFromBytes(69, 98, 113);
-    colors[ImGuiCol_Header] = colorFromBytes(35, 51, 61);
-    colors[ImGuiCol_HeaderHovered] = colorFromBytes(50, 73, 86);
-    colors[ImGuiCol_HeaderActive] = colorFromBytes(64, 92, 105);
-    colors[ImGuiCol_Tab] = colorFromBytes(24, 30, 37);
-    colors[ImGuiCol_TabHovered] = colorFromBytes(61, 91, 104);
-    colors[ImGuiCol_TabSelected] = colorFromBytes(39, 56, 66);
-    colors[ImGuiCol_TabDimmed] = colorFromBytes(18, 23, 28);
-    colors[ImGuiCol_TabDimmedSelected] = colorFromBytes(30, 40, 49);
-    colors[ImGuiCol_DockingPreview] = colorFromBytes(92, 166, 184, 180);
-    colors[ImGuiCol_CheckMark] = colorFromBytes(114, 211, 189);
-    colors[ImGuiCol_SliderGrab] = colorFromBytes(101, 177, 194);
-    colors[ImGuiCol_SliderGrabActive] = colorFromBytes(126, 214, 225);
-    colors[ImGuiCol_ResizeGrip] = colorFromBytes(61, 91, 104, 90);
-    colors[ImGuiCol_ResizeGripHovered] = colorFromBytes(92, 166, 184, 160);
-    colors[ImGuiCol_Text] = colorFromBytes(227, 233, 238);
-    colors[ImGuiCol_TextDisabled] = colorFromBytes(137, 149, 158);
+    colors[ImGuiCol_FrameBgActive]  = colorFromBytes(50, 63, 76);
+    colors[ImGuiCol_TitleBg]        = colorFromBytes(15, 19, 24);
+    colors[ImGuiCol_TitleBgActive]  = colorFromBytes(28, 36, 44);
+    colors[ImGuiCol_MenuBarBg]      = colorFromBytes(13, 17, 21);
+    colors[ImGuiCol_Button]         = colorFromBytes(39, 57, 68);
+    colors[ImGuiCol_ButtonHovered]  = colorFromBytes(54, 79, 94);
+    colors[ImGuiCol_ButtonActive]   = colorFromBytes(69, 98, 113);
+    colors[ImGuiCol_Header]         = colorFromBytes(35, 51, 61);
+    colors[ImGuiCol_HeaderHovered]  = colorFromBytes(50, 73, 86);
+    colors[ImGuiCol_HeaderActive]   = colorFromBytes(64, 92, 105);
+    colors[ImGuiCol_Tab]            = colorFromBytes(24, 30, 37);
+    colors[ImGuiCol_TabHovered]     = colorFromBytes(61, 91, 104);
+    colors[ImGuiCol_TabSelected]    = colorFromBytes(39, 56, 66);
+    colors[ImGuiCol_TabDimmed]      = colorFromBytes(18, 23, 28);
+    colors[ImGuiCol_TabDimmedSelected]  = colorFromBytes(30, 40, 49);
+    colors[ImGuiCol_DockingPreview]     = colorFromBytes(92, 166, 184, 180);
+    colors[ImGuiCol_CheckMark]          = colorFromBytes(114, 211, 189);
+    colors[ImGuiCol_SliderGrab]         = colorFromBytes(101, 177, 194);
+    colors[ImGuiCol_SliderGrabActive]   = colorFromBytes(126, 214, 225);
+    colors[ImGuiCol_ResizeGrip]         = colorFromBytes(61, 91, 104, 90);
+    colors[ImGuiCol_ResizeGripHovered]  = colorFromBytes(92, 166, 184, 160);
+    colors[ImGuiCol_Text]               = colorFromBytes(227, 233, 238);
+    colors[ImGuiCol_TextDisabled]       = colorFromBytes(137, 149, 158);
 
-    if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+    colors[ImGuiCol_ScrollbarBg]          = colorFromBytes(14, 18, 22);
+    colors[ImGuiCol_ScrollbarGrab]        = colorFromBytes(45, 57, 70);
+    colors[ImGuiCol_ScrollbarGrabHovered] = colorFromBytes(60, 75, 90);
+    colors[ImGuiCol_ScrollbarGrabActive]  = colorFromBytes(80, 100, 115);
+
+    colors[ImGuiCol_TableHeaderBg]    = colorFromBytes(28, 36, 44);
+    colors[ImGuiCol_TableBorderStrong]= colorFromBytes(55, 65, 75);
+    colors[ImGuiCol_TableBorderLight] = colorFromBytes(35, 43, 53);
+    colors[ImGuiCol_TableRowBg]       = colorFromBytes(0, 0, 0, 0);
+    colors[ImGuiCol_TableRowBgAlt]    = colorFromBytes(255, 255, 255, 8);
+
+    colors[ImGuiCol_Separator]        = colorFromBytes(55, 65, 75);
+    colors[ImGuiCol_SeparatorHovered] = colorFromBytes(92, 166, 184);
+    colors[ImGuiCol_SeparatorActive]  = colorFromBytes(126, 214, 225);
+
+    colors[ImGuiCol_NavCursor]        = colorFromBytes(101, 177, 194, 200);
+    colors[ImGuiCol_ModalWindowDimBg] = colorFromBytes(0, 0, 0, 120);
+
+    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
         style.WindowRounding = 0.0f;
         colors[ImGuiCol_WindowBg].w = 1.0f;
     }
@@ -415,6 +444,8 @@ void UiApp::buildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size) {
     ImGuiID left{};
     ImGuiID right{};
     ImGuiID bottom{};
+    ImGuiID bottomLeft{};
+    ImGuiID bottomRight{};
     ImGuiID center{};
     ImGuiID centerBottom{};
     ImGuiID centerTop{};
@@ -422,6 +453,7 @@ void UiApp::buildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size) {
     ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.22f, &left, &center);
     ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.28f, &right, &center);
     ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.34f, &bottom, &center);
+    ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Right, 0.45f, &bottomRight, &bottomLeft);
     ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.38f, &centerBottom, &centerTop);
 
     ImGui::DockBuilderDockWindow("Process Selection", left);
@@ -435,11 +467,11 @@ void UiApp::buildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size) {
     ImGui::DockBuilderDockWindow("Disassembly", right);
     ImGui::DockBuilderDockWindow("Breakpoints", right);
 
-    ImGui::DockBuilderDockWindow("Pointer Scanner", bottom);
-    ImGui::DockBuilderDockWindow("Lua Scanner", bottom);
-    ImGui::DockBuilderDockWindow("Injection", bottom);
-    ImGui::DockBuilderDockWindow("Lua Console", bottom);
-    ImGui::DockBuilderDockWindow("Logs", bottom);
+    ImGui::DockBuilderDockWindow("Pointer Scanner", bottomLeft);
+    ImGui::DockBuilderDockWindow("Lua Scanner", bottomLeft);
+    ImGui::DockBuilderDockWindow("Injection", bottomRight);
+    ImGui::DockBuilderDockWindow("Lua Console", bottomRight);
+    ImGui::DockBuilderDockWindow("Logs", bottomRight);
 
     ImGui::DockBuilderFinish(dockspaceId);
     infra::Logger::instance().info("Applied default IDE layout.");
@@ -519,7 +551,18 @@ void UiApp::renderCommandBar() {
     ImGui::SameLine();
     ImGui::TextDisabled("%zu results", scanProgress.results);
 
-    ImGui::SameLine(ImGui::GetWindowWidth() - 470.0f);
+    {
+        const ImGuiStyle& st = ImGui::GetStyle();
+        const float pad = st.FramePadding.x * 2.0f;
+        const float sp  = st.ItemSpacing.x;
+        const float buttonsWidth =
+            ImGui::CalcTextSize("Refresh Target").x + pad +
+            ImGui::CalcTextSize("Reset Layout").x   + pad +
+            ImGui::CalcTextSize("Save Session").x   + pad +
+            ImGui::CalcTextSize("Detach").x         + pad +
+            sp * 3.0f;
+        ImGui::SameLine(ImGui::GetWindowWidth() - buttonsWidth - st.WindowPadding.x);
+    }
     if (ImGui::SmallButton("Refresh Target")) {
         refreshProcesses();
         if (attached) {
@@ -550,14 +593,8 @@ void UiApp::renderProcessPanel() {
     ImGui::TextDisabled("%zu processes", processes_.size());
     ImGui::Separator();
 
-    const float spacing = ImGui::GetStyle().ItemSpacing.x;
-    const float pad = ImGui::GetStyle().FramePadding.x * 2.0f;
-    float reservedWidth = ImGui::CalcTextSize("Refresh").x + pad + spacing;
-    if (services_.session().attached())
-        reservedWidth += ImGui::CalcTextSize("Detach").x + pad + spacing;
-    ImGui::SetNextItemWidth(-reservedWidth);
+    ImGui::SetNextItemWidth(-1.0f);
     ImGui::InputText("Filter", processFilter_.data(), processFilter_.size());
-    ImGui::SameLine();
     if (ImGui::Button("Refresh")) {
         refreshProcesses();
     }
@@ -601,7 +638,7 @@ void UiApp::renderScanPanel() {
     ImGui::Begin("Scanner");
     const auto typeNames = valueTypeNames();
 
-    ImGui::BeginChild("scan-controls", ImVec2(0, 112.0f), true);
+    ImGui::BeginChild("scan-controls", ImVec2(0, 132.0f), true);
     ImGui::TextDisabled("Scan setup");
     ImGui::SameLine();
     helpMarker("Use Unknown initial for broad baselines, then Changed/Unchanged/Increased/Decreased for narrowing. Exact scans compare against the typed value.");
@@ -858,6 +895,7 @@ void UiApp::renderMemoryPanel() {
         if (ImGui::BeginTabItem("Hex")) {
             if (!bytes.empty()) {
                 ImGui::BeginChild("hex-view", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
+                ImGui::PushFont(monoFont_, monoFont_->LegacySize);
                 const auto base = parseAddress(memoryAddress_.data()).value_or(0);
                 for (std::size_t row = 0; row < bytes.size(); row += 16) {
                     ImGui::Text("%s  ", domain::toHex(base + row).c_str());
@@ -876,6 +914,7 @@ void UiApp::renderMemoryPanel() {
                     }
                     ImGui::TextUnformatted(ascii.c_str());
                 }
+                ImGui::PopFont();
                 ImGui::EndChild();
             } else {
                 ImGui::TextDisabled("Attach to a target and enter an address to read memory.");
@@ -933,6 +972,7 @@ void UiApp::renderDisassemblyPanel() {
     const auto address = parseAddress(disasmAddress_.data());
     if (ImGui::BeginTabBar("disasm-tabs")) {
         if (ImGui::BeginTabItem("Listing")) {
+            ImGui::PushFont(monoFont_, monoFont_->LegacySize);
             if (address && services_.session().attached()) {
                 auto instructions = services_.disassembler().disassemble(services_.session(), *address, 64);
                 if (ImGui::BeginTable("disasm", 3, denseTableFlags | ImGuiTableFlags_ScrollY, ImVec2(0, 0))) {
@@ -954,6 +994,7 @@ void UiApp::renderDisassemblyPanel() {
             } else {
                 ImGui::TextDisabled("Attach and enter an address to disassemble around it.");
             }
+            ImGui::PopFont();
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Assembler Patch")) {
@@ -996,7 +1037,7 @@ void UiApp::renderBreakpointPanel() {
     ImGui::SetNextItemWidth(-120.0f);
     ImGui::InputTextWithHint("Label", "optional name", breakpointLabel_.data(), breakpointLabel_.size());
     ImGui::SameLine();
-    if (ImGui::Button("Set software breakpoint")) {
+    if (ImGui::Button("Set breakpoint")) {
         if (auto address = parseAddress(breakpointAddress_.data())) {
             if (auto result = services_.breakpoints().addBreakpoint(*address, breakpointLabel_.data()); !result) {
                 infra::Logger::instance().error("Breakpoint failed: " + result.error());
@@ -1120,9 +1161,11 @@ void UiApp::renderPointerPanel() {
             services_.pointerScanJob().start(options);
         }
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Cancel pointer scan")) {
-        services_.pointerScanJob().cancel();
+    if (services_.pointerScanJob().progress().running) {
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel pointer scan")) {
+            services_.pointerScanJob().cancel();
+        }
     }
     const auto progress = services_.pointerScanJob().progress();
     ImGui::ProgressBar(static_cast<float>(progress.fraction), ImVec2(-1, 0), progress.status.c_str());
@@ -1317,7 +1360,12 @@ void UiApp::renderLuaPanel() {
     if (ImGui::CollapsingHeader("API quick reference")) {
         ImGui::TextWrapped("processes(), attach(pid), detach(), read_u32(addr), write_u32(addr,val), read_bytes(addr,n), write_bytes(addr,hex), scan_exact_i32(v), scan_unknown_i32(), add_address(addr,type,desc,group), alloc(size), thread(start,param), loadlibrary(path)");
     }
-    ImGui::InputTextMultiline("Lua", luaInput_.data(), luaInput_.size(), ImVec2(-1, 170));
+    const float available = ImGui::GetContentRegionAvail().y;
+    const float buttonsRowH = ImGui::GetFrameHeightWithSpacing();
+    const float splitH = std::max(60.0f, (available - buttonsRowH) * 0.5f);
+    ImGui::PushFont(monoFont_, monoFont_->LegacySize);
+    ImGui::InputTextMultiline("Lua", luaInput_.data(), luaInput_.size(), ImVec2(-1, splitH));
+    ImGui::PopFont();
     if (ImGui::Button("Run Lua")) {
         const auto output = lua_.run(luaInput_.data());
         luaOutput_.insert(luaOutput_.end(), output.begin(), output.end());
@@ -1326,10 +1374,12 @@ void UiApp::renderLuaPanel() {
     if (ImGui::Button("Clear output")) {
         luaOutput_.clear();
     }
-    ImGui::BeginChild("lua-output", ImVec2(0, 180), true);
+    ImGui::BeginChild("lua-output", ImVec2(0, splitH), true);
+    ImGui::PushFont(monoFont_, monoFont_->LegacySize);
     for (const auto& line : luaOutput_) {
         ImGui::TextUnformatted(line.c_str());
     }
+    ImGui::PopFont();
     if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
         ImGui::SetScrollHereY(1.0f);
     }
@@ -1341,9 +1391,11 @@ void UiApp::renderLogPanel() {
     ImGui::Begin("Logs");
     ImGui::TextDisabled("Runtime log");
     ImGui::BeginChild("log-scroll", ImVec2(0, 0), true);
+    ImGui::PushFont(monoFont_, monoFont_->LegacySize);
     for (const auto& record : infra::Logger::instance().snapshot()) {
         ImGui::Text("[%s] %s", infra::Logger::levelName(record.level), record.message.c_str());
     }
+    ImGui::PopFont();
     if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
         ImGui::SetScrollHereY(1.0f);
     }

@@ -70,6 +70,7 @@ private:
     ID3D11DeviceContext* deviceContext_{};
     IDXGISwapChain* swapChain_{};
     ID3D11RenderTargetView* renderTargetView_{};
+    ImFont* monoFont_{};
 
     services::RuntimeServices services_;
     scripting::LuaConsole lua_;
