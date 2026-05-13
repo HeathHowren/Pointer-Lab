@@ -1,0 +1,5 @@
+build/
+.claude/
+*.user
+*.suo
+.vs/
