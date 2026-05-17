@@ -44,10 +44,27 @@ domain::ScanMode scanModeFromIndex(int index) {
     }
 }
 
+const char* valueTypeDisplayName(domain::ValueType type) {
+    switch (type) {
+    case domain::ValueType::Int8:   return "i8 (signed byte)";
+    case domain::ValueType::UInt8:  return "u8 (byte)";
+    case domain::ValueType::Int16:  return "i16 (short)";
+    case domain::ValueType::UInt16: return "u16 (unsigned short)";
+    case domain::ValueType::Int32:  return "i32 (int)";
+    case domain::ValueType::UInt32: return "u32 (unsigned int)";
+    case domain::ValueType::Int64:  return "i64 (long long)";
+    case domain::ValueType::UInt64: return "u64 (unsigned long long)";
+    case domain::ValueType::Float:  return "f32 (float)";
+    case domain::ValueType::Double: return "f64 (double)";
+    case domain::ValueType::Bytes:  return "bytes (byte array)";
+    }
+    return "unknown";
+}
+
 std::vector<const char*> valueTypeNames() {
     std::vector<const char*> names;
     for (const auto type : domain::valueTypes()) {
-        names.push_back(domain::valueTypeName(type));
+        names.push_back(valueTypeDisplayName(type));
     }
     return names;
 }
@@ -107,19 +124,10 @@ bool textMatchesFilter(const std::wstring& text, const char* filter) {
     return haystack.find(needle) != std::string::npos;
 }
 
-storage::ProjectTable tableFromSession(domain::TargetSession& session) {
-    storage::ProjectTable table;
-    table.lastPid = session.pid();
-    table.lastProcessName = session.processName();
-    table.entries = session.addressList().snapshot();
-    return table;
-}
-
 } // namespace
 
 UiApp::UiApp(HINSTANCE instance, int showCommand)
     : instance_(instance), showCommand_(showCommand), lua_(services_) {
-    copyText(projectPath_.data(), projectPath_.size(), infra::Paths::sessionFile().string());
     copyText(addDescription_.data(), addDescription_.size(), "Manual entry");
     copyText(addGroup_.data(), addGroup_.size(), "Default");
     copyText(luaScanScript_.data(), luaScanScript_.size(),
@@ -130,7 +138,6 @@ UiApp::UiApp(HINSTANCE instance, int showCommand)
 }
 
 UiApp::~UiApp() {
-    saveProject(infra::Paths::sessionFile());
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
@@ -161,7 +168,6 @@ int UiApp::run() {
     ImGui_ImplDX11_Init(device_, deviceContext_);
 
     refreshProcesses();
-    loadProject(infra::Paths::sessionFile());
 
     ShowWindow(hwnd_, showCommand_);
     UpdateWindow(hwnd_);
@@ -310,19 +316,24 @@ void UiApp::render() {
     renderMenu();
     renderCommandBar();
     renderDockspace();
+    // Core — always visible
     renderProcessPanel();
     renderScanPanel();
     renderAddressListPanel();
-    renderMemoryPanel();
-    renderDisassemblyPanel();
-    renderBreakpointPanel();
-    renderModulesPanel();
-    renderRegionsPanel();
-    renderPointerPanel();
-    renderInjectionPanel();
-    renderLuaScannerPanel();
-    renderLuaPanel();
-    renderLogPanel();
+
+    // On-demand inspection tools — snap into centerTop by default
+    if (showMemoryViewer_)  { ImGui::SetNextWindowDockID(snapCenterTopId_,    ImGuiCond_Appearing); renderMemoryPanel(); }
+    if (showDisassembly_)   { ImGui::SetNextWindowDockID(snapCenterTopId_,    ImGuiCond_Appearing); renderDisassemblyPanel(); }
+    if (showBreakpoints_)   { ImGui::SetNextWindowDockID(snapCenterTopId_,    ImGuiCond_Appearing); renderBreakpointPanel(); }
+    if (showModules_)       { ImGui::SetNextWindowDockID(snapLeftId_,         ImGuiCond_Appearing); renderModulesPanel(); }
+    if (showMemoryRegions_) { ImGui::SetNextWindowDockID(snapLeftId_,         ImGuiCond_Appearing); renderRegionsPanel(); }
+    if (showLogs_)          { ImGui::SetNextWindowDockID(snapCenterBottomId_, ImGuiCond_Appearing); renderLogPanel(); }
+
+    // On-demand advanced tools — snap into centerBottom by default
+    if (showPointerScanner_) { ImGui::SetNextWindowDockID(snapCenterBottomId_, ImGuiCond_Appearing); renderPointerPanel(); }
+    if (showLuaScanner_)     { ImGui::SetNextWindowDockID(snapCenterBottomId_, ImGuiCond_Appearing); renderLuaScannerPanel(); }
+    if (showInjection_)      { ImGui::SetNextWindowDockID(snapCenterBottomId_, ImGuiCond_Appearing); renderInjectionPanel(); }
+    if (showLuaConsole_)     { ImGui::SetNextWindowDockID(snapCenterBottomId_, ImGuiCond_Appearing); renderLuaPanel(); }
 
     ImGui::Render();
     const float clearColor[4] = {0.06f, 0.07f, 0.08f, 1.0f};
@@ -441,66 +452,47 @@ void UiApp::buildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size) {
     ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(dockspaceId, size);
 
-    ImGuiID left{};
-    ImGuiID right{};
-    ImGuiID bottom{};
-    ImGuiID bottomLeft{};
-    ImGuiID bottomRight{};
-    ImGuiID center{};
-    ImGuiID centerBottom{};
-    ImGuiID centerTop{};
+    ImGuiID left{}, center{}, centerTop{}, centerBottom{};
 
-    ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.22f, &left, &center);
-    ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.28f, &right, &center);
-    ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.34f, &bottom, &center);
-    ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Right, 0.45f, &bottomRight, &bottomLeft);
-    ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.38f, &centerBottom, &centerTop);
+    ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.25f, &left,         &center);
+    ImGui::DockBuilderSplitNode(center,      ImGuiDir_Down, 0.45f, &centerBottom, &centerTop);
+
+    snapLeftId_         = left;
+    snapCenterTopId_    = centerTop;
+    snapCenterBottomId_ = centerBottom;
 
     ImGui::DockBuilderDockWindow("Process Selection", left);
-    ImGui::DockBuilderDockWindow("Modules", left);
-    ImGui::DockBuilderDockWindow("Memory Regions", left);
-
-    ImGui::DockBuilderDockWindow("Scanner", centerTop);
-    ImGui::DockBuilderDockWindow("Address List", centerBottom);
-
-    ImGui::DockBuilderDockWindow("Memory Viewer", right);
-    ImGui::DockBuilderDockWindow("Disassembly", right);
-    ImGui::DockBuilderDockWindow("Breakpoints", right);
-
-    ImGui::DockBuilderDockWindow("Pointer Scanner", bottomLeft);
-    ImGui::DockBuilderDockWindow("Lua Scanner", bottomLeft);
-    ImGui::DockBuilderDockWindow("Injection", bottomRight);
-    ImGui::DockBuilderDockWindow("Lua Console", bottomRight);
-    ImGui::DockBuilderDockWindow("Logs", bottomRight);
+    ImGui::DockBuilderDockWindow("Scanner",           centerTop);
+    ImGui::DockBuilderDockWindow("Address List",      centerBottom);
 
     ImGui::DockBuilderFinish(dockspaceId);
-    infra::Logger::instance().info("Applied default IDE layout.");
+    infra::Logger::instance().info("Applied default layout.");
 }
 
 void UiApp::renderMenu() {
     if (!ImGui::BeginMainMenuBar()) {
         return;
     }
-    if (ImGui::BeginMenu("File")) {
-        ImGui::SetNextItemWidth(420.0f);
-        ImGui::InputText("Project path", projectPath_.data(), projectPath_.size());
-        if (ImGui::MenuItem("Save")) {
-            saveProject(projectPath_.data());
-        }
-        if (ImGui::MenuItem("Load")) {
-            loadProject(projectPath_.data());
-        }
-        if (ImGui::MenuItem("Save session")) {
-            saveProject(infra::Paths::sessionFile());
-        }
-        ImGui::EndMenu();
-    }
     if (ImGui::BeginMenu("View")) {
         if (ImGui::MenuItem("Reset default layout")) {
             resetDockLayout_ = true;
         }
         ImGui::MenuItem("Show manual address editor", nullptr, &showManualAddressEditor_);
-        ImGui::MenuItem("Show scan filters", nullptr, &showScannerFilters_);
+        ImGui::MenuItem("Show scan filters",          nullptr, &showScannerFilters_);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Memory Viewer"))  showMemoryViewer_  = true;
+        if (ImGui::MenuItem("Disassembly"))   showDisassembly_   = true;
+        if (ImGui::MenuItem("Breakpoints"))   showBreakpoints_   = true;
+        if (ImGui::MenuItem("Modules"))       showModules_       = true;
+        if (ImGui::MenuItem("Memory Regions")) showMemoryRegions_ = true;
+        if (ImGui::MenuItem("Logs"))          showLogs_          = true;
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Tools")) {
+        if (ImGui::MenuItem("Pointer Scanner")) showPointerScanner_ = true;
+        if (ImGui::MenuItem("Lua Scanner"))    showLuaScanner_     = true;
+        if (ImGui::MenuItem("Injection"))      showInjection_      = true;
+        if (ImGui::MenuItem("Lua Console"))    showLuaConsole_     = true;
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Target")) {
@@ -558,9 +550,8 @@ void UiApp::renderCommandBar() {
         const float buttonsWidth =
             ImGui::CalcTextSize("Refresh Target").x + pad +
             ImGui::CalcTextSize("Reset Layout").x   + pad +
-            ImGui::CalcTextSize("Save Session").x   + pad +
             ImGui::CalcTextSize("Detach").x         + pad +
-            sp * 3.0f;
+            sp * 2.0f;
         ImGui::SameLine(ImGui::GetWindowWidth() - buttonsWidth - st.WindowPadding.x);
     }
     if (ImGui::SmallButton("Refresh Target")) {
@@ -572,10 +563,6 @@ void UiApp::renderCommandBar() {
     ImGui::SameLine();
     if (ImGui::SmallButton("Reset Layout")) {
         resetDockLayout_ = true;
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Save Session")) {
-        saveProject(infra::Paths::sessionFile());
     }
     ImGui::SameLine();
     if (ImGui::SmallButton("Detach") && attached) {
@@ -594,7 +581,7 @@ void UiApp::renderProcessPanel() {
     ImGui::Separator();
 
     ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputText("Filter", processFilter_.data(), processFilter_.size());
+    ImGui::InputText("##filter", processFilter_.data(), processFilter_.size());
     if (ImGui::Button("Refresh")) {
         refreshProcesses();
     }
@@ -877,7 +864,7 @@ void UiApp::renderAddressListPanel() {
 }
 
 void UiApp::renderMemoryPanel() {
-    ImGui::Begin("Memory Viewer");
+    ImGui::Begin("Memory Viewer", &showMemoryViewer_);
     ImGui::SetNextItemWidth(210.0f);
     ImGui::InputTextWithHint("Address", "0x7FF...", memoryAddress_.data(), memoryAddress_.size());
     ImGui::SameLine();
@@ -966,7 +953,7 @@ void UiApp::renderMemoryPanel() {
 }
 
 void UiApp::renderDisassemblyPanel() {
-    ImGui::Begin("Disassembly");
+    ImGui::Begin("Disassembly", &showDisassembly_);
     ImGui::SetNextItemWidth(220.0f);
     ImGui::InputTextWithHint("Address", "0x7FF...", disasmAddress_.data(), disasmAddress_.size());
     const auto address = parseAddress(disasmAddress_.data());
@@ -1020,7 +1007,7 @@ void UiApp::renderDisassemblyPanel() {
 }
 
 void UiApp::renderBreakpointPanel() {
-    ImGui::Begin("Breakpoints");
+    ImGui::Begin("Breakpoints", &showBreakpoints_);
     statusPill(services_.breakpoints().debuggerAttached() ? "DEBUGGER ATTACHED" : "DEBUGGER OFF",
         services_.breakpoints().debuggerAttached() ? colorFromBytes(30, 111, 96) : colorFromBytes(63, 75, 88));
     ImGui::SameLine();
@@ -1074,17 +1061,17 @@ void UiApp::renderBreakpointPanel() {
 }
 
 void UiApp::renderModulesPanel() {
-    ImGui::Begin("Modules");
+    ImGui::Begin("Modules", &showModules_);
     if (ImGui::Button("Refresh") && services_.session().attached()) {
         services_.session().refresh();
     }
     ImGui::SameLine();
     ImGui::TextDisabled("%zu loaded", services_.session().modules().size());
     if (ImGui::BeginTable("modules", 4, denseTableFlags | ImGuiTableFlags_ScrollY, ImVec2(0, 0))) {
-        ImGui::TableSetupColumn("Base");
-        ImGui::TableSetupColumn("Size");
-        ImGui::TableSetupColumn("Name");
-        ImGui::TableSetupColumn("Path");
+        ImGui::TableSetupColumn("Base",  ImGuiTableColumnFlags_WidthFixed,   130.0f);
+        ImGui::TableSetupColumn("Size",  ImGuiTableColumnFlags_WidthFixed,    80.0f);
+        ImGui::TableSetupColumn("Name",  ImGuiTableColumnFlags_WidthFixed,   160.0f);
+        ImGui::TableSetupColumn("Path",  ImGuiTableColumnFlags_WidthStretch,   1.0f);
         ImGui::TableHeadersRow();
         for (const auto& module : services_.session().modules()) {
             ImGui::TableNextRow();
@@ -1103,19 +1090,19 @@ void UiApp::renderModulesPanel() {
 }
 
 void UiApp::renderRegionsPanel() {
-    ImGui::Begin("Memory Regions");
+    ImGui::Begin("Memory Regions", &showMemoryRegions_);
     if (ImGui::Button("Refresh") && services_.session().attached()) {
         services_.session().refresh();
     }
     ImGui::SameLine();
     ImGui::TextDisabled("%zu regions", services_.session().regions().size());
     if (ImGui::BeginTable("regions", 6, denseTableFlags | ImGuiTableFlags_ScrollY, ImVec2(0, 0))) {
-        ImGui::TableSetupColumn("Base");
-        ImGui::TableSetupColumn("End");
-        ImGui::TableSetupColumn("Size");
-        ImGui::TableSetupColumn("Protect");
-        ImGui::TableSetupColumn("Access");
-        ImGui::TableSetupColumn("Action");
+        ImGui::TableSetupColumn("Base",    ImGuiTableColumnFlags_WidthFixed,   130.0f);
+        ImGui::TableSetupColumn("End",     ImGuiTableColumnFlags_WidthFixed,   130.0f);
+        ImGui::TableSetupColumn("Size",    ImGuiTableColumnFlags_WidthFixed,    80.0f);
+        ImGui::TableSetupColumn("Protect", ImGuiTableColumnFlags_WidthFixed,    160.0f);
+        ImGui::TableSetupColumn("Access",  ImGuiTableColumnFlags_WidthFixed,    48.0f);
+        ImGui::TableSetupColumn("Action",  ImGuiTableColumnFlags_WidthFixed,    48.0f);
         ImGui::TableHeadersRow();
         for (const auto& region : services_.session().regions()) {
             ImGui::TableNextRow();
@@ -1133,6 +1120,7 @@ void UiApp::renderRegionsPanel() {
             ImGui::PushID(static_cast<int>(region.base));
             if (ImGui::SmallButton("View")) {
                 copyText(memoryAddress_.data(), memoryAddress_.size(), domain::toHex(region.base));
+                showMemoryViewer_ = true;
             }
             ImGui::PopID();
         }
@@ -1142,7 +1130,7 @@ void UiApp::renderRegionsPanel() {
 }
 
 void UiApp::renderPointerPanel() {
-    ImGui::Begin("Pointer Scanner");
+    ImGui::Begin("Pointer Scanner", &showPointerScanner_);
     ImGui::SetNextItemWidth(220.0f);
     ImGui::InputTextWithHint("Target address", "0x7FF...", pointerTarget_.data(), pointerTarget_.size());
     ImGui::SameLine();
@@ -1200,7 +1188,7 @@ void UiApp::renderPointerPanel() {
 }
 
 void UiApp::renderInjectionPanel() {
-    ImGui::Begin("Injection");
+    ImGui::Begin("Injection", &showInjection_);
     if (ImGui::BeginTabBar("inject-tabs")) {
         if (ImGui::BeginTabItem("Allocate")) {
             ImGui::InputText("Allocation size", allocSize_.data(), allocSize_.size());
@@ -1250,7 +1238,7 @@ void UiApp::renderInjectionPanel() {
 }
 
 void UiApp::renderLuaScannerPanel() {
-    ImGui::Begin("Lua Scanner");
+    ImGui::Begin("Lua Scanner", &showLuaScanner_);
     const auto typeNames = valueTypeNames();
 
     ImGui::BeginChild("lua-scan-controls", ImVec2(0, 140.0f), true);
@@ -1356,7 +1344,7 @@ void UiApp::renderLuaScannerPanel() {
 }
 
 void UiApp::renderLuaPanel() {
-    ImGui::Begin("Lua Console");
+    ImGui::Begin("Lua Console", &showLuaConsole_);
     if (ImGui::CollapsingHeader("API quick reference")) {
         ImGui::TextWrapped("processes(), attach(pid), detach(), read_u32(addr), write_u32(addr,val), read_bytes(addr,n), write_bytes(addr,hex), scan_exact_i32(v), scan_unknown_i32(), add_address(addr,type,desc,group), alloc(size), thread(start,param), loadlibrary(path)");
     }
@@ -1388,7 +1376,7 @@ void UiApp::renderLuaPanel() {
 }
 
 void UiApp::renderLogPanel() {
-    ImGui::Begin("Logs");
+    ImGui::Begin("Logs", &showLogs_);
     ImGui::TextDisabled("Runtime log");
     ImGui::BeginChild("log-scroll", ImVec2(0, 0), true);
     ImGui::PushFont(monoFont_, monoFont_->LegacySize);
@@ -1419,26 +1407,6 @@ void UiApp::refreshProcesses() {
     processes_ = services_.platform().listProcesses();
 }
 
-void UiApp::saveProject(const std::filesystem::path& path) {
-    if (auto result = projectStore_.save(path, tableFromSession(services_.session())); !result) {
-        infra::Logger::instance().error("Save failed: " + result.error());
-    } else {
-        infra::Logger::instance().info("Saved project to " + path.string() + ".");
-    }
-}
-
-void UiApp::loadProject(const std::filesystem::path& path) {
-    if (!std::filesystem::exists(path)) {
-        return;
-    }
-    auto loaded = projectStore_.load(path);
-    if (!loaded) {
-        infra::Logger::instance().warn("Load skipped: " + loaded.error());
-        return;
-    }
-    services_.session().addressList().replace(loaded.value().entries);
-    infra::Logger::instance().info("Loaded project table from " + path.string() + ".");
-}
 
 std::optional<std::uintptr_t> UiApp::parseAddress(const char* text) {
     if (!text || text[0] == '\0') {

@@ -2,8 +2,6 @@
 
 #include "scripting/LuaConsole.h"
 #include "services/RuntimeServices.h"
-#include "storage/ProjectStore.h"
-
 #include <Windows.h>
 #include <d3d11.h>
 #include <imgui.h>
@@ -57,8 +55,6 @@ private:
     void handleHotkeys();
 
     void refreshProcesses();
-    void saveProject(const std::filesystem::path& path);
-    void loadProject(const std::filesystem::path& path);
 
     static std::optional<std::uintptr_t> parseAddress(const char* text);
     static void copyText(char* destination, std::size_t size, const std::string& text);
@@ -74,16 +70,27 @@ private:
 
     services::RuntimeServices services_;
     scripting::LuaConsole lua_;
-    storage::ProjectStore projectStore_;
 
     bool dockLayoutInitialized_{};
     bool resetDockLayout_{};
+    ImGuiID snapLeftId_{};
+    ImGuiID snapCenterTopId_{};
+    ImGuiID snapCenterBottomId_{};
     bool showManualAddressEditor_{};
     bool showScannerFilters_{};
+    bool showMemoryViewer_{};
+    bool showDisassembly_{};
+    bool showBreakpoints_{};
+    bool showModules_{};
+    bool showMemoryRegions_{};
+    bool showLogs_{};
+    bool showPointerScanner_{};
+    bool showLuaScanner_{};
+    bool showInjection_{};
+    bool showLuaConsole_{};
 
     std::vector<domain::ProcessInfo> processes_;
     std::array<char, 128> processFilter_{};
-    std::array<char, 512> projectPath_{};
 
     int scanTypeIndex_{4};
     int scanModeIndex_{0};
