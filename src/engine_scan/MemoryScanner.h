@@ -17,12 +17,19 @@ struct ScanProgress {
     double fraction{};
     std::size_t results{};
     std::string status;
+    // Set when the result limit stopped the scan early, so the UI can say so
+    // instead of presenting a partial sweep as a complete one.
+    bool truncated{};
 };
 
 struct ScanOptions {
-    std::size_t maxResults{250000};
+    std::size_t maxResults{1000000};
     bool writableOnly{};
     bool executableOnly{};
+    // Tolerance for exact float and double matches. Comparing floats by their
+    // bytes almost never finds anything, because a displayed 100.0 is rarely
+    // bit-identical to the stored value.
+    double floatEpsilon{0.0001};
 };
 
 class ScanJob {
@@ -51,6 +58,9 @@ private:
     mutable std::mutex mutex_;
     std::jthread worker_;
     std::atomic_bool cancel_{false};
+    // Distinct from cancel_, which used to be reused for "hit the cap" and made
+    // a truncated scan indistinguishable from one the user stopped.
+    std::atomic_bool truncated_{false};
     std::atomic_bool running_{false};
     std::atomic<double> fraction_{0.0};
     std::string status_;
@@ -58,6 +68,12 @@ private:
     domain::ValueType valueType_{domain::ValueType::Int32};
 };
 
-bool compareValues(domain::ScanMode mode, domain::ValueType type, const std::vector<std::uint8_t>& current, const std::vector<std::uint8_t>& previous, const std::vector<std::uint8_t>& exact);
+bool compareValues(domain::ScanMode mode, domain::ValueType type, const std::vector<std::uint8_t>& current,
+                   const std::vector<std::uint8_t>& previous, const std::vector<std::uint8_t>& exact,
+                   const std::vector<std::uint8_t>& mask = {}, double floatEpsilon = 0.0);
+
+// True when mode needs a previous value and therefore cannot filter on a first
+// scan; such a scan captures a baseline instead.
+[[nodiscard]] bool modeNeedsBaseline(domain::ScanMode mode);
 
 } // namespace ire::engine_scan

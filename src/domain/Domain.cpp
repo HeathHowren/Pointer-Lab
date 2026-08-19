@@ -140,6 +140,77 @@ std::vector<std::uint8_t> parseHexBytes(const std::string& text) {
     return bytes;
 }
 
+std::optional<HexPattern> parseHexPattern(const std::string& text) {
+    // Accepts "48 8B ?? 24", "488B??24" and "48 8b ? 24". A single '?' stands
+    // for a whole wildcard byte, matching the convention used by every other
+    // pattern scanner.
+    std::string compact;
+    for (const char c : text) {
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            continue;
+        }
+        if (std::isxdigit(static_cast<unsigned char>(c)) || c == '?') {
+            compact.push_back(c);
+        } else {
+            return std::nullopt;
+        }
+    }
+    if (compact.empty()) {
+        return std::nullopt;
+    }
+
+    HexPattern pattern;
+    for (std::size_t i = 0; i < compact.size();) {
+        if (compact[i] == '?') {
+            // Consume "??" as one wildcard byte, or a lone '?' as the same.
+            i += (i + 1 < compact.size() && compact[i + 1] == '?') ? 2 : 1;
+            pattern.bytes.push_back(0);
+            pattern.mask.push_back(0x00);
+            continue;
+        }
+        if (i + 1 >= compact.size() || !std::isxdigit(static_cast<unsigned char>(compact[i + 1]))) {
+            return std::nullopt; // odd digit, or a half-wildcard like "A?"
+        }
+        const auto high = compact[i];
+        const auto low = compact[i + 1];
+        const auto digit = [](char c) -> std::uint8_t {
+            if (c >= '0' && c <= '9') return static_cast<std::uint8_t>(c - '0');
+            if (c >= 'a' && c <= 'f') return static_cast<std::uint8_t>(c - 'a' + 10);
+            return static_cast<std::uint8_t>(c - 'A' + 10);
+        };
+        pattern.bytes.push_back(static_cast<std::uint8_t>((digit(high) << 4) | digit(low)));
+        pattern.mask.push_back(0xFF);
+        i += 2;
+    }
+    return pattern;
+}
+
+std::optional<std::uintptr_t> parseAddress(const std::string& text) {
+    std::string value;
+    for (const char c : text) {
+        if (!std::isspace(static_cast<unsigned char>(c))) {
+            value.push_back(c);
+        }
+    }
+    if (value.empty()) {
+        return std::nullopt;
+    }
+
+    // Addresses are always hexadecimal, with or without an 0x prefix. Inferring
+    // the base from the digits present made "00400000" parse as decimal and
+    // silently resolve to a completely different address.
+    if (value.rfind("0x", 0) == 0 || value.rfind("0X", 0) == 0) {
+        value.erase(0, 2);
+    }
+    if (value.empty() || value.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) {
+        return std::nullopt;
+    }
+    if (value.size() > 16) { // wider than 64 bits
+        return std::nullopt;
+    }
+    return static_cast<std::uintptr_t>(std::stoull(value, nullptr, 16));
+}
+
 std::optional<ScanValue> parseScanValue(ValueType type, const std::string& text) {
     try {
         ScanValue value;
@@ -156,7 +227,17 @@ std::optional<ScanValue> parseScanValue(ValueType type, const std::string& text)
         case ValueType::UInt64: value.bytes = pack(static_cast<std::uint64_t>(std::stoull(text, nullptr, 0))); break;
         case ValueType::Float: value.bytes = pack(static_cast<float>(std::stof(text))); break;
         case ValueType::Double: value.bytes = pack(static_cast<double>(std::stod(text))); break;
-        case ValueType::Bytes: value.bytes = parseHexBytes(text); break;
+        case ValueType::Bytes: {
+            // Wildcards used to be stripped silently, so "90 ?? 90" quietly
+            // became the two-byte pattern "90 90".
+            auto pattern = parseHexPattern(text);
+            if (!pattern) {
+                return std::nullopt;
+            }
+            value.bytes = std::move(pattern->bytes);
+            value.mask = std::move(pattern->mask);
+            break;
+        }
         }
         if (value.bytes.empty()) {
             return std::nullopt;

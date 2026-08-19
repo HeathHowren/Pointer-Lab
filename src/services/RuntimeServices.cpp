@@ -34,6 +34,57 @@ std::uint64_t AddressListService::add(std::uintptr_t address, domain::ValueType 
     return session_.addressList().add(std::move(entry));
 }
 
+std::uint64_t AddressListService::addChain(domain::PointerChain chain, domain::ValueType type,
+                                           std::string description, std::string group) {
+    domain::AddressEntry entry;
+    entry.type = type;
+    entry.description = std::move(description);
+    entry.group = std::move(group);
+
+    // Resolve once up front so the entry has a usable address immediately
+    // rather than showing nothing until the next background pass.
+    if (auto resolved = engine_pointer::resolveChain(session_, chain)) {
+        entry.address = resolved.value();
+        entry.resolved = true;
+        if (const auto size = domain::valueTypeSize(type); size > 0) {
+            if (auto bytes = session_.readBytes(entry.address, size)) {
+                entry.frozenValue = std::move(bytes.value());
+            }
+        }
+    } else {
+        entry.address = chain.scanTimeBase();
+        entry.resolved = false;
+        infra::Logger::instance().warn("Pointer chain did not resolve when it was added: " + resolved.error());
+    }
+
+    entry.chain = std::move(chain);
+    return session_.addressList().add(std::move(entry));
+}
+
+void AddressListService::resolvePointerChains() {
+    if (!session_.attached()) {
+        return;
+    }
+    for (auto entry : session_.addressList().snapshot()) {
+        if (!entry.chain) {
+            continue;
+        }
+        auto resolved = engine_pointer::resolveChain(session_, *entry.chain);
+        const bool ok = resolved.has_value();
+        const auto address = ok ? resolved.value() : entry.address;
+        if (ok == entry.resolved && address == entry.address) {
+            continue;
+        }
+        if (!ok && entry.resolved) {
+            infra::Logger::instance().warn("Pointer chain for \"" + entry.description + "\" stopped resolving: " +
+                                           resolved.error());
+        }
+        entry.address = address;
+        entry.resolved = ok;
+        session_.addressList().update(entry);
+    }
+}
+
 bool AddressListService::remove(std::uint64_t id) {
     return session_.addressList().remove(id);
 }
@@ -81,15 +132,38 @@ void AddressListService::toggleHotkey(const std::string& hotkey) {
 }
 
 void AddressListService::freezeLoop(std::stop_token token) {
+    int tick = 0;
     while (!token.stop_requested()) {
         if (session_.attached()) {
+            // Chains are re-resolved far less often than freezes are written:
+            // each one costs a read per level, and pointers move on the scale of
+            // level loads, not milliseconds.
+            if (tick % resolveEveryTicks == 0) {
+                resolvePointerChains();
+            }
+
             for (const auto& entry : session_.addressList().snapshot()) {
-                if (entry.frozen && !entry.frozenValue.empty()) {
-                    session_.writeBytes(entry.address, entry.frozenValue);
+                if (!entry.frozen || entry.frozenValue.empty() || !entry.resolved) {
+                    continue;
                 }
+                auto written = session_.writeBytes(entry.address, entry.frozenValue);
+                if (written) {
+                    continue;
+                }
+                // Dropping this Result meant a freeze on a read-only or
+                // unmapped page looked exactly like a working one. Report once
+                // and switch the entry off rather than failing twenty times a
+                // second forever.
+                infra::Logger::instance().error(
+                    "Freeze failed at " + domain::toHex(entry.address) + " (" + written.error() +
+                    "). Unfreezing this entry.");
+                auto current = entry;
+                current.frozen = false;
+                session_.addressList().update(current);
             }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        ++tick;
+        std::this_thread::sleep_for(std::chrono::milliseconds(freezeIntervalMs));
     }
 }
 
@@ -101,25 +175,30 @@ BreakpointService::~BreakpointService() {
 
 infra::Result<void> BreakpointService::attachDebugger() {
     if (!session_.attached()) {
-        return infra::Result<void>::fail("No target process attached.");
+        return infra::Result<void>::fail("No target process is attached.");
     }
     if (debugPump_.attached()) {
         return infra::Result<void>::ok();
     }
-    return debugPump_.attach(session_.pid(), [this](std::uintptr_t address) { onBreakpointHit(address); });
+
+    return debugPump_.attach(
+        session_.pid(),
+        [this](const domain::BreakpointInfo& info) {
+            std::string message = "Breakpoint hit at " + domain::toHex(info.address);
+            if (!info.label.empty()) {
+                message += " (" + info.label + ")";
+            }
+            message += " on thread " + std::to_string(info.lastHit.threadId) + ", hit " +
+                       std::to_string(info.hitCount) + ".";
+            queueEvent(std::move(message), true);
+        },
+        [this](std::uint32_t exitCode) {
+            queueEvent("The target process exited with code " + std::to_string(exitCode) + ".", false);
+        });
 }
 
 void BreakpointService::detachDebugger() {
-    std::vector<std::uintptr_t> addresses;
-    {
-        std::scoped_lock lock(mutex_);
-        for (const auto& [address, _] : breakpoints_) {
-            addresses.push_back(address);
-        }
-    }
-    for (const auto address : addresses) {
-        removeBreakpoint(address);
-    }
+    // The pump restores every original byte on its way out.
     debugPump_.detach();
 }
 
@@ -129,79 +208,52 @@ infra::Result<void> BreakpointService::addBreakpoint(std::uintptr_t address, std
         return attach;
     }
 
-    auto original = session_.readBytes(address, 1);
-    if (!original || original.value().size() != 1) {
-        return infra::Result<void>::fail(original ? "Could not read original byte." : original.error());
+    auto added = debugPump_.addBreakpoint(address, std::move(label));
+    if (added) {
+        infra::Logger::instance().info("Breakpoint set at " + domain::toHex(address) + ".");
     }
-    std::vector<std::uint8_t> int3{0xCC};
-    auto write = session_.writeBytes(address, int3);
-    if (!write) {
-        return write;
-    }
-
-    domain::BreakpointInfo bp;
-    bp.address = address;
-    bp.originalByte = original.value()[0];
-    bp.enabled = true;
-    bp.label = std::move(label);
-    {
-        std::scoped_lock lock(mutex_);
-        breakpoints_[address] = bp;
-    }
-    infra::Logger::instance().info("Breakpoint set at " + domain::toHex(address) + ".");
-    return infra::Result<void>::ok();
+    return added;
 }
 
 infra::Result<void> BreakpointService::removeBreakpoint(std::uintptr_t address) {
-    domain::BreakpointInfo bp;
-    {
-        std::scoped_lock lock(mutex_);
-        auto it = breakpoints_.find(address);
-        if (it == breakpoints_.end()) {
-            return infra::Result<void>::ok();
-        }
-        bp = it->second;
-        breakpoints_.erase(it);
+    auto removed = debugPump_.removeBreakpoint(address);
+    if (removed) {
+        infra::Logger::instance().info("Breakpoint removed at " + domain::toHex(address) + ".");
+    } else {
+        infra::Logger::instance().error(removed.error());
     }
-
-    if (bp.enabled && session_.attached()) {
-        std::vector<std::uint8_t> original{bp.originalByte};
-        session_.writeBytes(address, original);
-    }
-    infra::Logger::instance().info("Breakpoint removed at " + domain::toHex(address) + ".");
-    return infra::Result<void>::ok();
+    return removed;
 }
 
 std::vector<domain::BreakpointInfo> BreakpointService::breakpoints() const {
-    std::vector<domain::BreakpointInfo> items;
-    std::scoped_lock lock(mutex_);
-    for (const auto& [_, bp] : breakpoints_) {
-        items.push_back(bp);
-    }
-    return items;
+    return debugPump_.breakpoints();
 }
 
 bool BreakpointService::debuggerAttached() const {
     return debugPump_.attached();
 }
 
-void BreakpointService::onBreakpointHit(std::uintptr_t address) {
-    std::uintptr_t key = address;
-    {
-        std::scoped_lock lock(mutex_);
-        if (!breakpoints_.contains(key) && breakpoints_.contains(address - 1)) {
-            key = address - 1;
-        }
-        auto it = breakpoints_.find(key);
-        if (it == breakpoints_.end()) {
+std::vector<std::string> BreakpointService::takeEvents() {
+    std::scoped_lock lock(mutex_);
+    return std::move(events_);
+}
+
+void BreakpointService::queueEvent(std::string message, bool rateLimited) {
+    std::scoped_lock lock(mutex_);
+
+    if (rateLimited) {
+        // A breakpoint inside a hot loop fires thousands of times a second.
+        // Logging and queueing every one of them would cost more than the
+        // breakpoint itself and bury everything else in the log.
+        const auto now = std::chrono::steady_clock::now();
+        if (lastEvent_.time_since_epoch().count() != 0 && now - lastEvent_ < std::chrono::milliseconds(500)) {
             return;
         }
-        it->second.hitCount++;
-        it->second.enabled = false;
-        std::vector<std::uint8_t> original{it->second.originalByte};
-        session_.writeBytes(key, original);
+        lastEvent_ = now;
     }
-    infra::Logger::instance().info("Breakpoint hit at " + domain::toHex(key) + ". It was restored and disabled.");
+
+    infra::Logger::instance().info(message);
+    events_.push_back(std::move(message));
 }
 
 RuntimeServices::RuntimeServices()
