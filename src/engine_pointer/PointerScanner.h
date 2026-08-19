@@ -22,6 +22,10 @@ struct PointerScanOptions {
     std::uint32_t maxDepth{3};
     std::uint32_t maxOffset{0x1000};
     std::size_t maxResults{10000};
+    // Separate from maxResults: the frontier is the set of addresses the next
+    // depth searches for, and capping it with the result limit meant raising
+    // one silently changed how much of the address space got searched.
+    std::size_t maxFrontier{200000};
 };
 
 class PointerScanJob {
@@ -49,6 +53,12 @@ private:
     std::string status_;
     std::vector<domain::PointerChain> results_;
 };
+
+// Walks a chain in the live target and returns the address it currently points
+// at. The module is looked up by name every time, so a chain found before a
+// restart still resolves afterwards even though ASLR moved everything.
+[[nodiscard]] infra::Result<std::uintptr_t> resolveChain(domain::TargetSession& session,
+                                                         const domain::PointerChain& chain);
 
 } // namespace ire::engine_pointer
 

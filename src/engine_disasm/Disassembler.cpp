@@ -1,107 +1,140 @@
 #include "engine_disasm/Disassembler.h"
 
-#include <cstring>
-#include <iomanip>
-#include <sstream>
+#include <Zydis/Zydis.h>
+
+#include <algorithm>
 
 namespace ire::engine_disasm {
 
 namespace {
 
-std::int32_t rel32(const std::vector<std::uint8_t>& bytes, std::size_t index) {
-    std::int32_t value{};
-    std::memcpy(&value, bytes.data() + index, sizeof(value));
-    return value;
-}
+// A whole listing is never worth more than this in one read, however many
+// instructions were asked for.
+constexpr std::size_t maxReadSize = 64 * 1024;
 
-std::int8_t rel8(const std::vector<std::uint8_t>& bytes, std::size_t index) {
-    std::int8_t value{};
-    std::memcpy(&value, bytes.data() + index, sizeof(value));
-    return value;
-}
-
-std::uint64_t imm64(const std::vector<std::uint8_t>& bytes, std::size_t index) {
-    std::uint64_t value{};
-    std::memcpy(&value, bytes.data() + index, sizeof(value));
-    return value;
-}
-
-domain::Instruction decodeOne(std::uintptr_t address, const std::vector<std::uint8_t>& bytes, std::size_t offset) {
-    const auto op = bytes[offset];
-    domain::Instruction ins;
-    ins.address = address + offset;
-    auto take = [&](std::size_t n, std::string text) {
-        const auto end = std::min(bytes.size(), offset + n);
-        ins.bytes.assign(bytes.begin() + static_cast<std::ptrdiff_t>(offset), bytes.begin() + static_cast<std::ptrdiff_t>(end));
-        ins.text = std::move(text);
-        return ins;
-    };
-
-    switch (op) {
-    case 0x90: return take(1, "nop");
-    case 0xC3: return take(1, "ret");
-    case 0xCC: return take(1, "int3");
-    case 0x55: return take(1, "push rbp");
-    case 0x53: return take(1, "push rbx");
-    case 0x57: return take(1, "push rdi");
-    case 0x56: return take(1, "push rsi");
-    case 0x5D: return take(1, "pop rbp");
-    case 0x5B: return take(1, "pop rbx");
-    case 0x5F: return take(1, "pop rdi");
-    case 0x5E: return take(1, "pop rsi");
-    case 0x31:
-        if (offset + 1 < bytes.size() && bytes[offset + 1] == 0xC0) return take(2, "xor eax, eax");
-        break;
-    case 0x33:
-        if (offset + 1 < bytes.size() && bytes[offset + 1] == 0xC0) return take(2, "xor eax, eax");
-        break;
-    case 0x48:
-        if (offset + 1 < bytes.size() && bytes[offset + 1] == 0x89) return take(3, "mov r/m64, r64");
-        if (offset + 1 < bytes.size() && bytes[offset + 1] == 0x8B) return take(3, "mov r64, r/m64");
-        if (offset + 9 < bytes.size() && bytes[offset + 1] == 0xB8) {
-            return take(10, "mov rax, " + domain::toHex(static_cast<std::uintptr_t>(imm64(bytes, offset + 2))));
-        }
-        break;
-    case 0x8B: return take(std::min<std::size_t>(3, bytes.size() - offset), "mov r32, r/m32");
-    case 0x89: return take(std::min<std::size_t>(3, bytes.size() - offset), "mov r/m32, r32");
-    case 0xE8:
-        if (offset + 4 < bytes.size()) return take(5, "call " + domain::toHex(address + offset + 5 + rel32(bytes, offset + 1)));
-        break;
-    case 0xE9:
-        if (offset + 4 < bytes.size()) return take(5, "jmp " + domain::toHex(address + offset + 5 + rel32(bytes, offset + 1)));
-        break;
-    case 0xEB:
-        if (offset + 1 < bytes.size()) return take(2, "jmp " + domain::toHex(address + offset + 2 + rel8(bytes, offset + 1)));
-        break;
-    case 0x74:
-        if (offset + 1 < bytes.size()) return take(2, "je " + domain::toHex(address + offset + 2 + rel8(bytes, offset + 1)));
-        break;
-    case 0x75:
-        if (offset + 1 < bytes.size()) return take(2, "jne " + domain::toHex(address + offset + 2 + rel8(bytes, offset + 1)));
+std::uintptr_t branchTarget(const ZydisDecodedInstruction& instruction, const ZydisDecodedOperand* operands,
+                            ZyanU64 runtimeAddress) {
+    switch (instruction.meta.category) {
+    case ZYDIS_CATEGORY_CALL:
+    case ZYDIS_CATEGORY_COND_BR:
+    case ZYDIS_CATEGORY_UNCOND_BR:
         break;
     default:
-        break;
+        return 0;
     }
 
-    return take(1, "db 0x" + domain::bytesToHex({op}, false));
+    for (ZyanU8 i = 0; i < instruction.operand_count_visible; ++i) {
+        // Only a relative immediate has a destination we can compute here; an
+        // indirect branch through a register is unknowable without the context.
+        if (operands[i].type != ZYDIS_OPERAND_TYPE_IMMEDIATE || !operands[i].imm.is_relative) {
+            continue;
+        }
+        ZyanU64 absolute{};
+        if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&instruction, &operands[i], runtimeAddress, &absolute))) {
+            return static_cast<std::uintptr_t>(absolute);
+        }
+    }
+    return 0;
 }
 
 } // namespace
 
-std::vector<domain::Instruction> Disassembler::disassemble(domain::TargetSession& session, std::uintptr_t address, std::size_t instructionCount) const {
+std::vector<domain::Instruction> Disassembler::disassemble(domain::TargetSession& session, std::uintptr_t address,
+                                                           std::size_t instructionCount) const {
     std::vector<domain::Instruction> instructions;
-    auto bytes = session.readBytes(address, 512);
-    if (!bytes) {
+    if (instructionCount == 0) {
         return instructions;
     }
 
-    std::size_t offset{};
-    while (offset < bytes.value().size() && instructions.size() < instructionCount) {
-        auto ins = decodeOne(address, bytes.value(), offset);
-        offset += std::max<std::size_t>(1, ins.bytes.size());
-        instructions.push_back(std::move(ins));
+    // 15 bytes is the architectural maximum instruction length, so this is
+    // always enough for the requested count without a second read. The old
+    // fixed 512-byte read silently produced a short listing for large counts.
+    const std::size_t wanted =
+        std::min(maxReadSize, instructionCount * static_cast<std::size_t>(ZYDIS_MAX_INSTRUCTION_LENGTH));
+
+    // A read that crosses into an unmapped page comes back short rather than
+    // failing, which is exactly what we want at the end of a module.
+    auto bytes = session.readBytes(address, wanted);
+    if (!bytes || bytes.value().empty()) {
+        return instructions;
     }
+    const auto& buffer = bytes.value();
+
+    ZydisDecoder decoder;
+    ZydisFormatter formatter;
+    if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)) ||
+        !ZYAN_SUCCESS(ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL))) {
+        return instructions;
+    }
+
+    instructions.reserve(instructionCount);
+    std::size_t offset{};
+    while (offset < buffer.size() && instructions.size() < instructionCount) {
+        const auto runtimeAddress = static_cast<ZyanU64>(address + offset);
+        const auto begin = buffer.begin() + static_cast<std::ptrdiff_t>(offset);
+
+        domain::Instruction result;
+        result.address = address + offset;
+
+        ZydisDecodedInstruction decoded{};
+        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT]{};
+        if (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, buffer.data() + offset, buffer.size() - offset, &decoded,
+                                                operands))) {
+            char text[256]{};
+            if (ZYAN_SUCCESS(ZydisFormatterFormatInstruction(&formatter, &decoded, operands,
+                                                             decoded.operand_count_visible, text, sizeof(text),
+                                                             runtimeAddress, nullptr))) {
+                result.text = text;
+            } else {
+                result.text = ZydisMnemonicGetString(decoded.mnemonic);
+            }
+            result.bytes.assign(begin, begin + decoded.length);
+            result.branchTarget = branchTarget(decoded, operands, runtimeAddress);
+            offset += decoded.length;
+        } else {
+            // Undecodable bytes are shown as data and we resynchronise one byte
+            // later, which is what a real listing does past the end of a
+            // function. Advancing by a guessed length instead is what used to
+            // desynchronise the whole listing.
+            result.bytes.assign(1, buffer[offset]);
+            result.text = "db 0x" + domain::bytesToHex(result.bytes, false);
+            result.valid = false;
+            offset += 1;
+        }
+
+        instructions.push_back(std::move(result));
+    }
+
     return instructions;
+}
+
+std::vector<std::uint8_t> padToInstructionBoundary(const Disassembler& disassembler, domain::TargetSession& session,
+                                                   std::uintptr_t address, std::vector<std::uint8_t> patch) {
+    if (patch.empty() || !session.attached()) {
+        return patch;
+    }
+
+    // Work out where the last instruction the patch overlaps actually ends. 32
+    // is far more than any patch can straddle: the shortest instruction is one
+    // byte, so a patch long enough to need more would be pathological.
+    const auto covering = disassembler.disassemble(session, address, 32);
+    std::size_t covered{};
+    for (const auto& instruction : covering) {
+        if (covered >= patch.size()) {
+            break;
+        }
+        // A zero-length entry would spin without making progress; the decoder
+        // never produces one, but the loop must not depend on that.
+        if (instruction.bytes.empty()) {
+            return patch;
+        }
+        covered += instruction.bytes.size();
+    }
+
+    if (covered > patch.size()) {
+        patch.resize(covered, 0x90);
+    }
+    return patch;
 }
 
 } // namespace ire::engine_disasm

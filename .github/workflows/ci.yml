@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  # Keystone pulls in the LLVM MC layer, which dominates a cold build.
+  DEPS_CACHE_VERSION: v1
+
+jobs:
+  build:
+    name: Build and test (${{ matrix.config }})
+    # Pinned, not windows-latest. The generator below names a specific toolset,
+    # so a runner-image roll forward removes the Visual Studio the configure
+    # step asks for and every job dies before compiling anything. This is also
+    # the toolset the release is actually verified against.
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cache the fetched + built dependencies. Both CMakeLists files are in the
+      # key: the top-level one pins ImGui, Lua, Zydis and Keystone, and
+      # tests/CMakeLists.txt pins Catch2. Hashing only the top-level file meant
+      # bumping the Catch2 pin still hit the old key exactly, and an exact hit
+      # also suppresses the save, so the stale tree would be restored forever.
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ env.DEPS_CACHE_VERSION }}-${{ matrix.config }}-${{ hashFiles('CMakeLists.txt', 'tests/CMakeLists.txt') }}
+          restore-keys: |
+            deps-${{ env.DEPS_CACHE_VERSION }}-${{ matrix.config }}-
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.config }}
+
+      - name: Test
+        run: ctest --test-dir build -C ${{ matrix.config }} --output-on-failure
+
+      - name: Package
+        if: matrix.config == 'Release'
+        run: cpack --config build/CPackConfig.cmake -C Release -B build/package
+
+      - name: Upload artifact
+        if: matrix.config == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PointerLab-windows-x64
+          path: build/package/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Attach build to release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: PointerLab-windows-x64
+          path: dist
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          body: |
+            Release binaries are **unsigned**. Windows SmartScreen will warn on
+            first run, and antivirus software may flag the executable because it
+            reads and writes other processes' memory by design.
+
+            See THIRD_PARTY_NOTICES.md for licensing (Pointer Lab is GPLv2).
+
+  analyze:
+    name: Static analysis (non-blocking)
+    runs-on: windows-2022
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ env.DEPS_CACHE_VERSION }}-Release-${{ hashFiles('CMakeLists.txt', 'tests/CMakeLists.txt') }}
+          restore-keys: |
+            deps-${{ env.DEPS_CACHE_VERSION }}-Release-
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      # /analyze is noisy on third-party headers, so it must never gate a merge.
+      - name: Build with /analyze
+        run: cmake --build build --config Release -- /p:EnablePREfast=true /p:RunCodeAnalysis=true

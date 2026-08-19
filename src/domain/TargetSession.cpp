@@ -11,9 +11,10 @@ TargetSession::~TargetSession() {
 }
 
 infra::Result<void> TargetSession::attach(std::uint32_t pid) {
-    auto process = platform_.openProcess(pid);
+    bool limitedAccess = false;
+    auto process = platform_.openProcess(pid, &limitedAccess);
     if (!process) {
-        return infra::Result<void>::fail(process.error());
+        return infra::Result<void>::fail(process.error(), process.code());
     }
 
     std::wstring name;
@@ -31,9 +32,19 @@ infra::Result<void> TargetSession::attach(std::uint32_t pid) {
         processName_ = std::move(name);
         modules_ = platform_.listModules(pid_);
         regions_ = platform_.listMemoryRegions(process_.get());
+        readOnly_ = limitedAccess;
     }
 
     infra::Logger::instance().info("Attached to process " + std::to_string(pid) + ".");
+    if (limitedAccess) {
+        // The attach genuinely succeeded, so this is a warning rather than a
+        // failure - but it used to be completely silent, and every later write
+        // then failed one at a time with no hint at the underlying cause.
+        infra::Logger::instance().warn(
+            "Attached to process " + std::to_string(pid) + " with read-only access. "
+            "Writing, freezing, patching and injection will fail. "
+            "Run Pointer Lab as administrator for full access.");
+    }
     return infra::Result<void>::ok();
 }
 
@@ -44,6 +55,7 @@ void TargetSession::detach() {
     }
     process_.reset();
     pid_ = 0;
+    readOnly_ = false;
     processName_.clear();
     modules_.clear();
     regions_.clear();
@@ -61,6 +73,11 @@ void TargetSession::refresh() {
 bool TargetSession::attached() const {
     std::scoped_lock lock(mutex_);
     return static_cast<bool>(process_);
+}
+
+bool TargetSession::readOnly() const {
+    std::scoped_lock lock(mutex_);
+    return static_cast<bool>(process_) && readOnly_;
 }
 
 std::uint32_t TargetSession::pid() const {
@@ -88,28 +105,23 @@ std::vector<MemoryRegion> TargetSession::regions() const {
     return regions_;
 }
 
+// The lock is held across the platform call. Copying the raw HANDLE out and
+// releasing the lock first left a window where detach() could close it while a
+// scan or the freeze thread was still using it.
 infra::Result<std::vector<std::uint8_t>> TargetSession::readBytes(std::uintptr_t address, std::size_t size) const {
-    HANDLE process{};
-    {
-        std::scoped_lock lock(mutex_);
-        process = process_.get();
-    }
-    if (!process) {
+    std::scoped_lock lock(mutex_);
+    if (!process_) {
         return infra::Result<std::vector<std::uint8_t>>::fail("No target process attached.");
     }
-    return platform_.readMemory(process, address, size);
+    return platform_.readMemory(process_.get(), address, size);
 }
 
 infra::Result<void> TargetSession::writeBytes(std::uintptr_t address, const std::vector<std::uint8_t>& bytes) const {
-    HANDLE process{};
-    {
-        std::scoped_lock lock(mutex_);
-        process = process_.get();
-    }
-    if (!process) {
+    std::scoped_lock lock(mutex_);
+    if (!process_) {
         return infra::Result<void>::fail("No target process attached.");
     }
-    return platform_.writeMemory(process, address, bytes.data(), bytes.size());
+    return platform_.writeMemory(process_.get(), address, bytes.data(), bytes.size());
 }
 
 } // namespace ire::domain

@@ -128,45 +128,118 @@ std::vector<domain::MemoryRegion> Win32Platform::listMemoryRegions(HANDLE proces
     return regions;
 }
 
-infra::Result<UniqueHandle> Win32Platform::openProcess(std::uint32_t pid) const {
+infra::Result<UniqueHandle> Win32Platform::openProcess(std::uint32_t pid, bool* limitedAccess) const {
+    if (limitedAccess) {
+        *limitedAccess = false;
+    }
+
     const DWORD rights =
         PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION |
         PROCESS_CREATE_THREAD | PROCESS_SUSPEND_RESUME | SYNCHRONIZE;
 
     HANDLE process = OpenProcess(rights, FALSE, pid);
     if (!process) {
+        // Remember why full access failed; the fallback overwrites GetLastError.
+        const DWORD fullAccessError = GetLastError();
         process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-    }
-    if (!process) {
-        return infra::Result<UniqueHandle>::fail(formatLastError());
+        if (!process) {
+            return infra::Result<UniqueHandle>::fail(formatLastError(fullAccessError), fullAccessError);
+        }
+        if (limitedAccess) {
+            *limitedAccess = true;
+        }
     }
     return infra::Result<UniqueHandle>::ok(UniqueHandle(process));
+}
+
+bool Win32Platform::isWow64(HANDLE process) {
+    BOOL wow64 = FALSE;
+    if (!IsWow64Process(process, &wow64)) {
+        return false;
+    }
+    return wow64 != FALSE;
+}
+
+infra::Result<void> Win32Platform::enableDebugPrivilege() {
+    HANDLE rawToken{};
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &rawToken)) {
+        return infra::Result<void>::fail(formatLastError(), GetLastError());
+    }
+    UniqueHandle token(rawToken);
+
+    LUID luid{};
+    if (!LookupPrivilegeValueW(nullptr, SE_DEBUG_NAME, &luid)) {
+        return infra::Result<void>::fail(formatLastError(), GetLastError());
+    }
+
+    TOKEN_PRIVILEGES privileges{};
+    privileges.PrivilegeCount = 1;
+    privileges.Privileges[0].Luid = luid;
+    privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+    if (!AdjustTokenPrivileges(token.get(), FALSE, &privileges, sizeof(privileges), nullptr, nullptr)) {
+        return infra::Result<void>::fail(formatLastError(), GetLastError());
+    }
+    // AdjustTokenPrivileges reports success even when the privilege was not
+    // held, so the real outcome is only visible in GetLastError.
+    const DWORD status = GetLastError();
+    if (status == ERROR_NOT_ALL_ASSIGNED) {
+        return infra::Result<void>::fail("SeDebugPrivilege is not held; run as administrator for full process access.", status);
+    }
+    return infra::Result<void>::ok();
 }
 
 infra::Result<std::vector<std::uint8_t>> Win32Platform::readMemory(HANDLE process, std::uintptr_t address, std::size_t size) const {
     std::vector<std::uint8_t> bytes(size);
     SIZE_T read{};
     if (!ReadProcessMemory(process, reinterpret_cast<LPCVOID>(address), bytes.data(), size, &read)) {
+        const DWORD error = GetLastError();
         if (read == 0) {
-            return infra::Result<std::vector<std::uint8_t>>::fail(formatLastError());
+            return infra::Result<std::vector<std::uint8_t>>::fail(formatLastError(error), error);
         }
+        // Partial read (typically ERROR_PARTIAL_COPY at the end of a mapped
+        // range). The shortened buffer below is the caller's signal.
     }
     bytes.resize(read);
     return infra::Result<std::vector<std::uint8_t>>::ok(std::move(bytes));
 }
 
 infra::Result<void> Win32Platform::writeMemory(HANDLE process, std::uintptr_t address, const void* data, std::size_t size) const {
-    DWORD oldProtection{};
-    VirtualProtectEx(process, reinterpret_cast<LPVOID>(address), size, PAGE_EXECUTE_READWRITE, &oldProtection);
-    SIZE_T written{};
-    const BOOL ok = WriteProcessMemory(process, reinterpret_cast<LPVOID>(address), data, size, &written);
-    FlushInstructionCache(process, reinterpret_cast<LPCVOID>(address), size);
-    if (oldProtection != 0) {
-        DWORD ignored{};
-        VirtualProtectEx(process, reinterpret_cast<LPVOID>(address), size, oldProtection, &ignored);
+    if (size == 0) {
+        return infra::Result<void>::ok();
     }
-    if (!ok || written != size) {
-        return infra::Result<void>::fail(formatLastError());
+
+    auto* target = reinterpret_cast<LPVOID>(address);
+
+    // Try the write as-is first. Most writes land on pages that are already
+    // writable, and forcing PAGE_EXECUTE_READWRITE on every write needlessly
+    // made data pages executable and left a very visible footprint.
+    SIZE_T written{};
+    if (WriteProcessMemory(process, target, data, size, &written) && written == size) {
+        FlushInstructionCache(process, target, size);
+        return infra::Result<void>::ok();
+    }
+
+    // Escalate: make the range writable, write, then put the protection back.
+    DWORD oldProtection{};
+    if (!VirtualProtectEx(process, target, size, PAGE_EXECUTE_READWRITE, &oldProtection)) {
+        const DWORD error = GetLastError();
+        return infra::Result<void>::fail("Could not make the target memory writable: " + formatLastError(error), error);
+    }
+
+    written = 0;
+    const BOOL wrote = WriteProcessMemory(process, target, data, size, &written);
+    const DWORD writeError = wrote ? ERROR_SUCCESS : GetLastError();
+    FlushInstructionCache(process, target, size);
+
+    // Always restore, even when the write failed.
+    DWORD restored{};
+    if (!VirtualProtectEx(process, target, size, oldProtection, &restored)) {
+        infra::Logger::instance().warn("Could not restore memory protection at " + domain::toHex(address) + ".");
+    }
+
+    if (!wrote || written != size) {
+        return infra::Result<void>::fail(formatLastError(writeError), writeError);
     }
     return infra::Result<void>::ok();
 }
@@ -193,33 +266,85 @@ infra::Result<void> Win32Platform::free(HANDLE process, std::uintptr_t address) 
     return infra::Result<void>::ok();
 }
 
-infra::Result<std::uint32_t> Win32Platform::createRemoteThread(HANDLE process, std::uintptr_t start, std::uintptr_t parameter) const {
+infra::Result<std::uint32_t> Win32Platform::createRemoteThread(HANDLE process, std::uintptr_t start, std::uintptr_t parameter,
+                                                              DWORD timeoutMs) const {
     UniqueHandle thread(CreateRemoteThread(process, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(start), reinterpret_cast<LPVOID>(parameter), 0, nullptr));
     if (!thread) {
-        return infra::Result<std::uint32_t>::fail(formatLastError());
+        return infra::Result<std::uint32_t>::fail(formatLastError(), GetLastError());
     }
-    WaitForSingleObject(thread.get(), 5000);
+
+    const DWORD waited = WaitForSingleObject(thread.get(), timeoutMs);
+    if (waited == WAIT_TIMEOUT) {
+        // Reporting GetExitCodeThread's STILL_ACTIVE (259) here used to look
+        // exactly like a thread that had finished and returned 259.
+        return infra::Result<std::uint32_t>::fail(
+            "The remote thread did not finish within " + std::to_string(timeoutMs) + " ms and is still running.",
+            WAIT_TIMEOUT);
+    }
+    if (waited != WAIT_OBJECT_0) {
+        const DWORD error = GetLastError();
+        return infra::Result<std::uint32_t>::fail("Waiting on the remote thread failed: " + formatLastError(error), error);
+    }
+
     DWORD exitCode{};
-    GetExitCodeThread(thread.get(), &exitCode);
+    if (!GetExitCodeThread(thread.get(), &exitCode)) {
+        const DWORD error = GetLastError();
+        return infra::Result<std::uint32_t>::fail(formatLastError(error), error);
+    }
     return infra::Result<std::uint32_t>::ok(exitCode);
 }
 
 infra::Result<std::uint32_t> Win32Platform::injectLoadLibraryW(HANDLE process, const std::wstring& dllPath) const {
-    const auto bytes = (dllPath.size() + 1) * sizeof(wchar_t);
-    auto remote = allocate(process, bytes, PAGE_READWRITE);
-    if (!remote) {
-        return infra::Result<std::uint32_t>::fail(remote.error());
+    if (dllPath.empty()) {
+        return infra::Result<std::uint32_t>::fail("No DLL path was given.");
     }
-    auto write = writeMemory(process, remote.value(), dllPath.c_str(), bytes);
-    if (!write) {
-        free(process, remote.value());
-        return infra::Result<std::uint32_t>::fail(write.error());
+    // LoadLibraryW is resolved from this process's kernel32, which is only at
+    // the same address in a target of the same architecture.
+    if (isWow64(process)) {
+        return infra::Result<std::uint32_t>::fail(
+            "The target is a 32-bit (WOW64) process. This 64-bit build of Pointer Lab cannot inject into it.");
     }
 
     HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (!kernel32) {
+        return infra::Result<std::uint32_t>::fail("Could not locate kernel32.dll.", GetLastError());
+    }
     const auto loadLibrary = reinterpret_cast<std::uintptr_t>(GetProcAddress(kernel32, "LoadLibraryW"));
+    if (loadLibrary == 0) {
+        return infra::Result<std::uint32_t>::fail("Could not resolve LoadLibraryW.", GetLastError());
+    }
+
+    const auto bytes = (dllPath.size() + 1) * sizeof(wchar_t);
+    auto remote = allocate(process, bytes, PAGE_READWRITE);
+    if (!remote) {
+        return infra::Result<std::uint32_t>::fail(remote.error(), remote.code());
+    }
+
+    auto write = writeMemory(process, remote.value(), dllPath.c_str(), bytes);
+    if (!write) {
+        auto released = free(process, remote.value());
+        if (!released) {
+            infra::Logger::instance().warn("Could not release the remote path buffer: " + released.error());
+        }
+        return infra::Result<std::uint32_t>::fail(write.error(), write.code());
+    }
+
     auto result = createRemoteThread(process, loadLibrary, remote.value());
-    free(process, remote.value());
+
+    // Only release the path buffer once the remote thread has actually
+    // finished with it. Freeing it after a timeout would pull the string out
+    // from under a LoadLibraryW call that is still reading it, crashing the
+    // target; leaking one small allocation is the far better outcome.
+    if (result) {
+        auto released = free(process, remote.value());
+        if (!released) {
+            infra::Logger::instance().warn("Could not release the remote path buffer: " + released.error());
+        }
+    } else {
+        infra::Logger::instance().warn(
+            "Leaving the remote path buffer at " + domain::toHex(remote.value()) +
+            " allocated because the injection thread did not complete; freeing it could crash the target.");
+    }
     return result;
 }
 
@@ -278,47 +403,140 @@ std::string Win32Platform::protectToString(DWORD protect) {
     }
 }
 
+namespace {
+
+constexpr std::uint8_t int3 = 0xCC;
+// EFLAGS.TF. Set it and the CPU raises a single-step exception after exactly
+// one instruction, which is how a breakpoint gets re-armed behind itself.
+constexpr DWORD trapFlag = 0x100;
+// How long detach() keeps pumping to let threads finish a step already in
+// progress, rather than abandoning them with the trap flag still set.
+constexpr auto drainTimeout = std::chrono::seconds(2);
+
+void captureRegisters(const CONTEXT& context, std::uint32_t threadId, domain::RegisterContext& out) {
+    out.rip = context.Rip;
+    out.rsp = context.Rsp;
+    out.rbp = context.Rbp;
+    out.rax = context.Rax;
+    out.rbx = context.Rbx;
+    out.rcx = context.Rcx;
+    out.rdx = context.Rdx;
+    out.rsi = context.Rsi;
+    out.rdi = context.Rdi;
+    out.r8 = context.R8;
+    out.r9 = context.R9;
+    out.r10 = context.R10;
+    out.r11 = context.R11;
+    out.r12 = context.R12;
+    out.r13 = context.R13;
+    out.r14 = context.R14;
+    out.r15 = context.R15;
+    out.eflags = context.EFlags;
+    out.threadId = threadId;
+    out.captured = true;
+}
+
+} // namespace
+
 DebugEventPump::~DebugEventPump() {
     detach();
 }
 
-infra::Result<void> DebugEventPump::attach(std::uint32_t pid, BreakpointHitCallback callback) {
+infra::Result<void> DebugEventPump::attach(std::uint32_t pid, HitCallback onHit, ExitCallback onExit) {
     detach();
-    if (!DebugActiveProcess(pid)) {
-        return infra::Result<void>::fail(Win32Platform::formatLastError());
-    }
-    if (!DebugSetProcessKillOnExit(FALSE)) {
-        DebugActiveProcessStop(pid);
-        return infra::Result<void>::fail(Win32Platform::formatLastError());
-    }
+
     pid_ = pid;
-    callback_ = std::move(callback);
+    onHit_ = std::move(onHit);
+    onExit_ = std::move(onExit);
     stop_ = false;
-    attached_ = true;
-    thread_ = CreateThread(nullptr, 0, [](LPVOID self) -> DWORD {
-        static_cast<DebugEventPump*>(self)->loop();
-        return 0;
-    }, this, 0, nullptr);
-    infra::Logger::instance().info("Debugger attached.");
-    return infra::Result<void>::ok();
+    targetExited_ = false;
+
+    // DebugActiveProcess, WaitForDebugEvent, ContinueDebugEvent and
+    // DebugActiveProcessStop must all be called from the same thread. Attaching
+    // here and pumping elsewhere is why no debug event ever arrived.
+    std::promise<infra::Result<void>> ready;
+    auto started = ready.get_future();
+    worker_ = std::jthread([this, promise = std::move(ready)]() mutable { run(std::move(promise)); });
+
+    auto result = started.get();
+    if (!result) {
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+    }
+    return result;
 }
 
 void DebugEventPump::detach() {
-    if (!attached_) {
+    stop_ = true;
+    if (worker_.joinable()) {
+        worker_.join();
+    }
+    stop_ = false;
+
+    std::scoped_lock lock(mutex_);
+    breakpoints_.clear();
+    stepping_.clear();
+}
+
+void DebugEventPump::run(std::promise<infra::Result<void>> ready) {
+    // The pump keeps its own handle. Borrowing the UI session's would mean the
+    // user detaching from the process pulled the handle out from under an
+    // in-flight breakpoint.
+    process_.reset(OpenProcess(PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION,
+                               FALSE, pid_));
+    if (!process_) {
+        const DWORD error = GetLastError();
+        ready.set_value(infra::Result<void>::fail(
+            "Could not open the target for debugging: " + Win32Platform::formatLastError(error), error));
         return;
     }
-    stop_ = true;
-    if (thread_) {
-        WaitForSingleObject(thread_, 2000);
-        CloseHandle(thread_);
-        thread_ = nullptr;
+
+    if (!DebugActiveProcess(pid_)) {
+        const DWORD error = GetLastError();
+        process_.reset();
+        ready.set_value(infra::Result<void>::fail(
+            "Could not attach the debugger: " + Win32Platform::formatLastError(error), error));
+        return;
     }
-    DebugActiveProcessStop(pid_);
+
+    // Without this, detaching or closing Pointer Lab kills the target outright.
+    if (!DebugSetProcessKillOnExit(FALSE)) {
+        infra::Logger::instance().warn("Could not clear kill-on-exit; closing Pointer Lab may terminate the target: " +
+                                       Win32Platform::formatLastError());
+    }
+
+    attached_ = true;
+    infra::Logger::instance().info("Debugger attached to pid " + std::to_string(pid_) + ".");
+    ready.set_value(infra::Result<void>::ok());
+
+    loop();
+
+    // Order matters on the way out. Restore every original byte first so no new
+    // trap can fire, then flush the events Windows has already queued, and only
+    // then let go. Detaching with any of that outstanding kills the target.
+    disarmAll();
+    if (!targetExited_) {
+        drainPendingEvents();
+    }
+    if (!targetExited_) {
+        DebugActiveProcessStop(pid_);
+    }
+    {
+        std::scoped_lock lock(mutex_);
+        stepping_.clear();
+        disarmed_.clear();
+    }
     attached_ = false;
+    process_.reset();
     infra::Logger::instance().info("Debugger detached.");
 }
 
 void DebugEventPump::loop() {
+    bool sawInitialBreakpoint = false;
+
+    // Threads mid-step and events already queued are handled by the drain in
+    // run(), so stopping here can be immediate.
     while (!stop_) {
         DEBUG_EVENT event{};
         if (!WaitForDebugEvent(&event, 100)) {
@@ -326,20 +544,343 @@ void DebugEventPump::loop() {
         }
 
         DWORD continueStatus = DBG_CONTINUE;
-        if (event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT) {
-            const auto& exception = event.u.Exception.ExceptionRecord;
-            if (exception.ExceptionCode == EXCEPTION_BREAKPOINT) {
-                const auto address = reinterpret_cast<std::uintptr_t>(exception.ExceptionAddress);
-                if (callback_) {
-                    callback_(address);
+        bool exiting = false;
+        DWORD exitCode = 0;
+
+        switch (event.dwDebugEventCode) {
+        case EXCEPTION_DEBUG_EVENT: {
+            const auto& record = event.u.Exception.ExceptionRecord;
+            const auto address = reinterpret_cast<std::uintptr_t>(record.ExceptionAddress);
+
+            if (record.ExceptionCode == EXCEPTION_BREAKPOINT) {
+                if (handleBreakpoint(address, event.dwThreadId)) {
+                    continueStatus = DBG_CONTINUE;
+                } else if (!sawInitialBreakpoint) {
+                    // The loader's own breakpoint, raised once when a debugger
+                    // attaches. It has to be swallowed; passing it through
+                    // terminates the target.
+                    sawInitialBreakpoint = true;
+                    continueStatus = DBG_CONTINUE;
+                } else {
+                    // Someone else's int3. It belongs to the target.
+                    continueStatus = DBG_EXCEPTION_NOT_HANDLED;
                 }
+            } else if (record.ExceptionCode == EXCEPTION_SINGLE_STEP) {
+                continueStatus = handleSingleStep(event.dwThreadId) ? DBG_CONTINUE : DBG_EXCEPTION_NOT_HANDLED;
+            } else {
+                // Every other exception is the target's own business.
+                continueStatus = DBG_EXCEPTION_NOT_HANDLED;
+            }
+            break;
+        }
+        case CREATE_PROCESS_DEBUG_EVENT:
+            // This file handle is the debugger's to close. Leaking one per
+            // attach kept the target's image file locked.
+            if (event.u.CreateProcessInfo.hFile != nullptr) {
+                CloseHandle(event.u.CreateProcessInfo.hFile);
+            }
+            break;
+        case LOAD_DLL_DEBUG_EVENT:
+            if (event.u.LoadDll.hFile != nullptr) {
+                CloseHandle(event.u.LoadDll.hFile);
+            }
+            break;
+        case EXIT_PROCESS_DEBUG_EVENT:
+            exiting = true;
+            exitCode = event.u.ExitProcess.dwExitCode;
+            break;
+        default:
+            break;
+        }
+
+        ContinueDebugEvent(event.dwProcessId, event.dwThreadId, continueStatus);
+
+        if (exiting) {
+            targetExited_ = true;
+            {
+                std::scoped_lock lock(mutex_);
+                breakpoints_.clear();
+                stepping_.clear();
+            }
+            if (onExit_) {
+                onExit_(exitCode);
+            }
+            break;
+        }
+    }
+}
+
+bool DebugEventPump::rewindThread(std::uintptr_t address, std::uint32_t threadId) const {
+    UniqueHandle thread(OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, threadId));
+    if (!thread) {
+        return false;
+    }
+    CONTEXT context{};
+    context.ContextFlags = CONTEXT_CONTROL;
+    if (!GetThreadContext(thread.get(), &context)) {
+        return false;
+    }
+    context.Rip = address;
+    return SetThreadContext(thread.get(), &context) != FALSE;
+}
+
+bool DebugEventPump::handleBreakpoint(std::uintptr_t address, std::uint32_t threadId) {
+    domain::BreakpointInfo snapshot;
+    {
+        std::scoped_lock lock(mutex_);
+        auto entry = breakpoints_.find(address);
+        if (entry == breakpoints_.end() || !entry->second.enabled) {
+            // A trap we armed and have since removed can still be in flight:
+            // the thread executed the int3 microseconds before the original
+            // byte went back. Its RIP still needs rewinding, and the exception
+            // is still ours to swallow - passing it on kills the target.
+            if (disarmed_.count(address) != 0) {
+                if (!rewindThread(address, threadId)) {
+                    infra::Logger::instance().error("Could not rewind a thread off a removed breakpoint at " +
+                                                    domain::toHex(address) + ".");
+                }
+                return true;
+            }
+            return false;
+        }
+
+        UniqueHandle thread(OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, threadId));
+        CONTEXT context{};
+        context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        if (!thread || !GetThreadContext(thread.get(), &context)) {
+            infra::Logger::instance().error("Breakpoint at " + domain::toHex(address) +
+                                            " was hit but its thread could not be read: " +
+                                            Win32Platform::formatLastError());
+            // Still ours, so still swallowed. Letting it through would be a
+            // certain kill rather than a possible one.
+            return true;
+        }
+
+        // int3 has already executed, so RIP sits one byte past the breakpoint.
+        // Resuming from there runs the tail of a half-decoded instruction,
+        // which is exactly what used to crash the target.
+        context.Rip = address;
+        captureRegisters(context, threadId, entry->second.lastHit);
+
+        // Put the original instruction back so the thread can execute it, and
+        // arm the trap flag so we get control again immediately afterwards.
+        if (auto restored = writeByte(address, entry->second.originalByte); !restored) {
+            infra::Logger::instance().error("Could not restore the original byte at " + domain::toHex(address) + ": " +
+                                            restored.error());
+            return true;
+        }
+        context.EFlags |= trapFlag;
+
+        if (!SetThreadContext(thread.get(), &context)) {
+            infra::Logger::instance().error("Could not rewind the thread at " + domain::toHex(address) + ": " +
+                                            Win32Platform::formatLastError());
+            // Leave the original byte in place: the breakpoint stops working,
+            // but the target keeps running, which is the better failure.
+            disarmed_.insert(address);
+            breakpoints_.erase(entry);
+            return true;
+        }
+
+        stepping_[threadId] = address;
+        entry->second.hitCount += 1;
+        snapshot = entry->second;
+    }
+
+    // Called without the lock: the callback reaches into the UI, which takes
+    // locks of its own.
+    if (onHit_) {
+        onHit_(snapshot);
+    }
+    return true;
+}
+
+bool DebugEventPump::handleSingleStep(std::uint32_t threadId) {
+    std::scoped_lock lock(mutex_);
+
+    auto stepping = stepping_.find(threadId);
+    if (stepping == stepping_.end()) {
+        // Not one of ours; the target is single-stepping itself.
+        return false;
+    }
+    const auto address = stepping->second;
+    stepping_.erase(stepping);
+
+    // The original instruction has now executed, so put the trap back. This is
+    // what makes a breakpoint fire more than once. The CPU has already cleared
+    // the trap flag for us as part of raising this exception.
+    auto entry = breakpoints_.find(address);
+    if (entry != breakpoints_.end() && entry->second.enabled) {
+        if (auto armed = writeByte(address, int3); !armed) {
+            infra::Logger::instance().error("Could not re-arm the breakpoint at " + domain::toHex(address) + ": " +
+                                            armed.error());
+            breakpoints_.erase(entry);
+        }
+    }
+    return true;
+}
+
+infra::Result<void> DebugEventPump::addBreakpoint(std::uintptr_t address, std::string label) {
+    if (!attached_) {
+        return infra::Result<void>::fail("The debugger is not attached.");
+    }
+
+    std::scoped_lock lock(mutex_);
+    if (breakpoints_.count(address) != 0) {
+        return infra::Result<void>::fail("There is already a breakpoint at " + domain::toHex(address) + ".");
+    }
+
+    auto original = readByte(address);
+    if (!original) {
+        return infra::Result<void>::fail("Could not read the target byte: " + original.error(), original.code());
+    }
+    if (original.value() == int3) {
+        // Saving 0xCC as the "original" byte would make removing the breakpoint
+        // leave a permanent int3 behind.
+        return infra::Result<void>::fail("There is already an int3 at " + domain::toHex(address) +
+                                         "; Pointer Lab will not stack a breakpoint on top of it.");
+    }
+
+    if (auto armed = writeByte(address, int3); !armed) {
+        return infra::Result<void>::fail("Could not arm the breakpoint: " + armed.error(), armed.code());
+    }
+    // Live again, so a trap here is no longer a stale one to be swallowed.
+    disarmed_.erase(address);
+
+    domain::BreakpointInfo info;
+    info.address = address;
+    info.originalByte = original.value();
+    info.enabled = true;
+    info.label = std::move(label);
+    breakpoints_.emplace(address, std::move(info));
+    return infra::Result<void>::ok();
+}
+
+infra::Result<void> DebugEventPump::removeBreakpoint(std::uintptr_t address) {
+    std::scoped_lock lock(mutex_);
+
+    auto entry = breakpoints_.find(address);
+    if (entry == breakpoints_.end()) {
+        return infra::Result<void>::fail("There is no breakpoint at " + domain::toHex(address) + ".");
+    }
+
+    // Erase first: if a thread is mid-step over this address, handleSingleStep
+    // must not find it and re-arm it behind us.
+    const auto originalByte = entry->second.originalByte;
+    const bool steppingOver = std::any_of(stepping_.begin(), stepping_.end(),
+                                          [address](const auto& pair) { return pair.second == address; });
+    breakpoints_.erase(entry);
+    // A thread may have executed the trap moments ago and its exception may
+    // still be in flight; that event is ours to absorb, not the target's.
+    disarmed_.insert(address);
+
+    // A thread stepping over it has already had the original byte restored.
+    if (!steppingOver) {
+        if (auto restored = writeByte(address, originalByte); !restored) {
+            return infra::Result<void>::fail("The breakpoint was removed but the original byte could not be written "
+                                             "back, so the target still contains an int3: " + restored.error(),
+                                             restored.code());
+        }
+    }
+    return infra::Result<void>::ok();
+}
+
+std::vector<domain::BreakpointInfo> DebugEventPump::breakpoints() const {
+    std::scoped_lock lock(mutex_);
+    std::vector<domain::BreakpointInfo> result;
+    result.reserve(breakpoints_.size());
+    for (const auto& [address, info] : breakpoints_) {
+        result.push_back(info);
+    }
+    return result;
+}
+
+void DebugEventPump::disarmAll() {
+    std::scoped_lock lock(mutex_);
+    for (const auto& [address, info] : breakpoints_) {
+        // A thread stepping over this one already has the original byte back.
+        const bool steppingOver = std::any_of(stepping_.begin(), stepping_.end(),
+                                              [addr = address](const auto& pair) { return pair.second == addr; });
+        if (!steppingOver) {
+            if (auto restored = writeByte(address, info.originalByte); !restored) {
+                infra::Logger::instance().error("Could not remove the breakpoint at " + domain::toHex(address) +
+                                                "; the target still contains an int3: " + restored.error());
+            }
+        }
+        disarmed_.insert(address);
+    }
+    breakpoints_.clear();
+}
+
+void DebugEventPump::drainPendingEvents() {
+    // Everything is disarmed by now, so no new trap can fire. What is left is
+    // whatever Windows already queued, and every one of those must be continued
+    // before letting go of the process: DebugActiveProcessStop delivers a
+    // pending exception to a target that no longer has a debugger, which kills
+    // it. With a breakpoint in a hot loop there is nearly always one in flight.
+    const auto deadline = std::chrono::steady_clock::now() + drainTimeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        DEBUG_EVENT event{};
+        if (!WaitForDebugEvent(&event, 50)) {
+            // Nothing queued for a full timeout: the target is clean.
+            break;
+        }
+
+        DWORD continueStatus = DBG_CONTINUE;
+        switch (event.dwDebugEventCode) {
+        case EXCEPTION_DEBUG_EVENT: {
+            const auto& record = event.u.Exception.ExceptionRecord;
+            const auto address = reinterpret_cast<std::uintptr_t>(record.ExceptionAddress);
+            if (record.ExceptionCode == EXCEPTION_BREAKPOINT) {
+                if (!handleBreakpoint(address, event.dwThreadId)) {
+                    continueStatus = DBG_EXCEPTION_NOT_HANDLED;
+                }
+            } else if (record.ExceptionCode == EXCEPTION_SINGLE_STEP) {
+                continueStatus = handleSingleStep(event.dwThreadId) ? DBG_CONTINUE : DBG_EXCEPTION_NOT_HANDLED;
             } else {
                 continueStatus = DBG_EXCEPTION_NOT_HANDLED;
             }
+            break;
+        }
+        case CREATE_PROCESS_DEBUG_EVENT:
+            if (event.u.CreateProcessInfo.hFile != nullptr) {
+                CloseHandle(event.u.CreateProcessInfo.hFile);
+            }
+            break;
+        case LOAD_DLL_DEBUG_EVENT:
+            if (event.u.LoadDll.hFile != nullptr) {
+                CloseHandle(event.u.LoadDll.hFile);
+            }
+            break;
+        case EXIT_PROCESS_DEBUG_EVENT:
+            targetExited_ = true;
+            ContinueDebugEvent(event.dwProcessId, event.dwThreadId, DBG_CONTINUE);
+            return;
+        default:
+            break;
         }
 
         ContinueDebugEvent(event.dwProcessId, event.dwThreadId, continueStatus);
     }
+}
+
+infra::Result<std::uint8_t> DebugEventPump::readByte(std::uintptr_t address) const {
+    auto bytes = platform_.readMemory(process_.get(), address, 1);
+    if (!bytes) {
+        return infra::Result<std::uint8_t>::fail(bytes.error(), bytes.code());
+    }
+    if (bytes.value().empty()) {
+        return infra::Result<std::uint8_t>::fail("Nothing is mapped at " + domain::toHex(address) + ".");
+    }
+    return infra::Result<std::uint8_t>::ok(bytes.value().front());
+}
+
+infra::Result<void> DebugEventPump::writeByte(std::uintptr_t address, std::uint8_t value) const {
+    auto written = platform_.writeMemory(process_.get(), address, &value, 1);
+    if (written) {
+        // Patched code can otherwise sit stale in an instruction cache.
+        FlushInstructionCache(process_.get(), reinterpret_cast<LPCVOID>(address), 1);
+    }
+    return written;
 }
 
 } // namespace ire::platform_win32

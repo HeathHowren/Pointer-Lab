@@ -2,12 +2,14 @@
 
 #include "scripting/LuaConsole.h"
 #include "services/RuntimeServices.h"
+#include "storage/ProjectStore.h"
 #include <Windows.h>
 #include <d3d11.h>
 #include <imgui.h>
 
 #include <array>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -29,6 +31,7 @@ private:
     LRESULT handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
     bool createWindow();
+    static void reportFatalStartupError(const wchar_t* message);
     bool createDeviceD3D(HWND hwnd);
     void cleanupDeviceD3D();
     void createRenderTarget();
@@ -52,7 +55,33 @@ private:
     void renderLuaScannerPanel();
     void renderLuaPanel();
     void renderLogPanel();
+    void renderToasts();
+    void renderConfirmModal();
+    void renderAboutWindow();
+    void renderHelpWindow();
     void handleHotkeys();
+
+    // Failures used to reach the user only through the Logs panel, which is
+    // hidden by default, so a failed patch looked exactly like a successful
+    // one. Everything user-facing goes through these.
+    void notifyInfo(const std::string& text);
+    void notifyError(const std::string& text);
+    void requestDetach();
+
+    // Project persistence. ProjectStore existed and worked but nothing ever
+    // called it, so the address list was lost on every exit.
+    void newProject();
+    void openProjectDialog();
+    void saveProject();
+    void saveProjectAs();
+    bool saveProjectTo(const std::filesystem::path& path, bool quiet);
+    bool loadProjectFrom(const std::filesystem::path& path, bool quiet);
+    void loadSession();
+    void saveSession();
+    [[nodiscard]] std::string projectTitle() const;
+
+    // Queues a confirmation dialog; action runs only if the user accepts.
+    void confirmAction(std::string title, std::string message, std::string confirmLabel, std::function<void()> action);
 
     void refreshProcesses();
 
@@ -67,27 +96,33 @@ private:
     IDXGISwapChain* swapChain_{};
     ID3D11RenderTargetView* renderTargetView_{};
     ImFont* monoFont_{};
+    bool imguiInitialized_{};
+    bool classRegistered_{};
+    bool minimized_{};
 
     services::RuntimeServices services_;
     scripting::LuaConsole lua_;
+    storage::ProjectStore projectStore_;
+    std::filesystem::path projectPath_;
 
     bool dockLayoutInitialized_{};
     bool resetDockLayout_{};
-    ImGuiID snapLeftId_{};
-    ImGuiID snapCenterTopId_{};
-    ImGuiID snapCenterBottomId_{};
     bool showManualAddressEditor_{};
     bool showScannerFilters_{};
-    bool showMemoryViewer_{};
-    bool showDisassembly_{};
-    bool showBreakpoints_{};
-    bool showModules_{};
-    bool showMemoryRegions_{};
-    bool showLogs_{};
-    bool showPointerScanner_{};
-    bool showLuaScanner_{};
-    bool showInjection_{};
-    bool showLuaConsole_{};
+    // Panels are open by default and have a home in the default layout. Hiding
+    // them until the user finds the View menu made most of the tool invisible
+    // on a first run; a panel that is in the way can be closed, but one that
+    // was never seen cannot be looked for.
+    bool showMemoryViewer_{true};
+    bool showDisassembly_{true};
+    bool showBreakpoints_{true};
+    bool showModules_{true};
+    bool showMemoryRegions_{true};
+    bool showLogs_{true};
+    bool showPointerScanner_{true};
+    bool showLuaScanner_{true};
+    bool showInjection_{true};
+    bool showLuaConsole_{true};
 
     std::vector<domain::ProcessInfo> processes_;
     std::array<char, 128> processFilter_{};
@@ -97,6 +132,8 @@ private:
     std::array<char, 128> scanText_{};
     bool scanWritableOnly_{};
     bool scanExecutableOnly_{};
+    int scanMaxResults_{1000000};
+    float scanFloatEpsilon_{0.0001f};
 
     std::array<char, 64> addAddress_{};
     std::array<char, 128> addDescription_{};
@@ -105,6 +142,11 @@ private:
     std::array<char, 32> addHotkey_{};
     int addTypeIndex_{4};
     std::uint64_t editEntryId_{};
+
+    // Per-row write popup, so a row's Write button no longer takes its value
+    // from the shared manual-editor field.
+    std::array<char, 128> rowWriteValue_{};
+    std::uint64_t rowWriteId_{};
 
     std::array<char, 64> memoryAddress_{};
     std::array<char, 256> memoryPatch_{};
@@ -118,6 +160,7 @@ private:
 
     std::array<char, 64> pointerTarget_{};
     int pointerDepth_{3};
+    int pointerTypeIndex_{4};
     std::array<char, 64> pointerMaxOffset_{"0x1000"};
 
     std::array<char, 64> allocSize_{"4096"};
@@ -134,6 +177,27 @@ private:
 
     std::array<char, 4096> luaInput_{};
     std::vector<std::string> luaOutput_;
+
+    std::array<char, 128> logFilter_{};
+
+    struct Toast {
+        std::string text;
+        bool error{};
+        float secondsRemaining{};
+    };
+    std::vector<Toast> toasts_;
+
+    struct PendingConfirm {
+        std::string title;
+        std::string message;
+        std::string confirmLabel;
+        std::function<void()> action;
+        bool opened{};
+    };
+    std::optional<PendingConfirm> pendingConfirm_;
+
+    bool showAbout_{};
+    bool showHelp_{};
 };
 
 } // namespace ire::ui

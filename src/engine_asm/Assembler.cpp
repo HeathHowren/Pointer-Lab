@@ -1,6 +1,6 @@
 #include "engine_asm/Assembler.h"
 
-#include "domain/Domain.h"
+#include <keystone/keystone.h>
 
 #include <algorithm>
 #include <cctype>
@@ -10,86 +10,107 @@ namespace ire::engine_asm {
 
 namespace {
 
+using Bytes = infra::Result<std::vector<std::uint8_t>>;
+
 std::string trim(std::string text) {
-    auto isSpace = [](unsigned char c) { return std::isspace(c) != 0; };
-    text.erase(text.begin(), std::find_if(text.begin(), text.end(), [&](char c) { return !isSpace(static_cast<unsigned char>(c)); }));
-    text.erase(std::find_if(text.rbegin(), text.rend(), [&](char c) { return !isSpace(static_cast<unsigned char>(c)); }).base(), text.end());
+    const auto notSpace = [](char c) { return std::isspace(static_cast<unsigned char>(c)) == 0; };
+    text.erase(text.begin(), std::find_if(text.begin(), text.end(), notSpace));
+    text.erase(std::find_if(text.rbegin(), text.rend(), notSpace).base(), text.end());
     return text;
 }
 
-std::string lower(std::string text) {
-    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return text;
+// Strips ';' and '//' comments and blank lines. Keystone treats ';' as a
+// statement separator, so without this it would try to assemble comment text as
+// code and report a confusing error on a line that looks perfectly fine.
+std::string stripComments(const std::string& source) {
+    std::istringstream input(source);
+    std::string line;
+    std::string result;
+
+    while (std::getline(input, line)) {
+        if (const auto comment = line.find(';'); comment != std::string::npos) {
+            line.erase(comment);
+        }
+        if (const auto comment = line.find("//"); comment != std::string::npos) {
+            line.erase(comment);
+        }
+        line = trim(std::move(line));
+        if (line.empty()) {
+            continue;
+        }
+        if (!result.empty()) {
+            result.push_back('\n');
+        }
+        result += line;
+    }
+    return result;
 }
 
-std::uintptr_t parseInteger(const std::string& text) {
-    return static_cast<std::uintptr_t>(std::stoull(text, nullptr, 0));
-}
+// RAII around the engine handle; ks_asm has several failure paths and each one
+// would otherwise need its own ks_close.
+class Engine {
+public:
+    Engine() {
+        error_ = ks_open(KS_ARCH_X86, KS_MODE_64, &handle_);
+        if (error_ == KS_ERR_OK && handle_ != nullptr) {
+            error_ = ks_option(handle_, KS_OPT_SYNTAX, KS_OPT_SYNTAX_INTEL);
+        }
+    }
 
-template <typename T>
-void append(std::vector<std::uint8_t>& out, T value) {
-    auto* p = reinterpret_cast<const std::uint8_t*>(&value);
-    out.insert(out.end(), p, p + sizeof(T));
-}
+    ~Engine() {
+        if (handle_ != nullptr) {
+            ks_close(handle_);
+        }
+    }
+
+    Engine(const Engine&) = delete;
+    Engine& operator=(const Engine&) = delete;
+
+    [[nodiscard]] bool ok() const { return error_ == KS_ERR_OK && handle_ != nullptr; }
+    [[nodiscard]] ks_engine* get() const { return handle_; }
+    [[nodiscard]] ks_err error() const { return error_; }
+
+private:
+    ks_engine* handle_{};
+    ks_err error_{KS_ERR_OK};
+};
 
 } // namespace
 
-infra::Result<std::vector<std::uint8_t>> Assembler::assemble(const std::string& source, std::uintptr_t baseAddress) const {
-    std::vector<std::uint8_t> bytes;
-    std::istringstream input(source);
-    std::string line;
-
-    try {
-        while (std::getline(input, line)) {
-            if (const auto comment = line.find(';'); comment != std::string::npos) {
-                line = line.substr(0, comment);
-            }
-            line = trim(line);
-            if (line.empty()) {
-                continue;
-            }
-            const auto normalized = lower(line);
-            const auto currentAddress = baseAddress + bytes.size();
-
-            if (normalized == "nop") {
-                bytes.push_back(0x90);
-            } else if (normalized == "ret") {
-                bytes.push_back(0xC3);
-            } else if (normalized == "int3" || normalized == "break") {
-                bytes.push_back(0xCC);
-            } else if (normalized == "xor eax,eax" || normalized == "xor eax, eax") {
-                bytes.insert(bytes.end(), {0x31, 0xC0});
-            } else if (normalized.rfind("db ", 0) == 0) {
-                auto raw = domain::parseHexBytes(line.substr(3));
-                bytes.insert(bytes.end(), raw.begin(), raw.end());
-            } else if (normalized.rfind("jmp ", 0) == 0) {
-                const auto target = parseInteger(trim(line.substr(4)));
-                const auto rel = static_cast<std::int32_t>(target - (currentAddress + 5));
-                bytes.push_back(0xE9);
-                append(bytes, rel);
-            } else if (normalized.rfind("call ", 0) == 0) {
-                const auto target = parseInteger(trim(line.substr(5)));
-                const auto rel = static_cast<std::int32_t>(target - (currentAddress + 5));
-                bytes.push_back(0xE8);
-                append(bytes, rel);
-            } else if (normalized.rfind("push ", 0) == 0) {
-                const auto value = static_cast<std::uint32_t>(parseInteger(trim(line.substr(5))));
-                bytes.push_back(0x68);
-                append(bytes, value);
-            } else if (normalized.rfind("mov rax,", 0) == 0) {
-                const auto value = static_cast<std::uint64_t>(parseInteger(trim(line.substr(line.find(',') + 1))));
-                bytes.insert(bytes.end(), {0x48, 0xB8});
-                append(bytes, value);
-            } else {
-                return infra::Result<std::vector<std::uint8_t>>::fail("Unsupported assembly line: " + line);
-            }
-        }
-    } catch (const std::exception& e) {
-        return infra::Result<std::vector<std::uint8_t>>::fail(e.what());
+infra::Result<std::vector<std::uint8_t>> Assembler::assemble(const std::string& source,
+                                                             std::uintptr_t baseAddress) const {
+    const auto text = stripComments(source);
+    if (text.empty()) {
+        return Bytes::fail("Nothing to assemble.");
     }
 
-    return infra::Result<std::vector<std::uint8_t>>::ok(std::move(bytes));
+    Engine engine;
+    if (!engine.ok()) {
+        return Bytes::fail(std::string("Could not start the assembler: ") + ks_strerror(engine.error()));
+    }
+
+    unsigned char* encoding{};
+    std::size_t encodingSize{};
+    std::size_t statementCount{};
+    // baseAddress matters: a relative jmp or call assembles to a different
+    // displacement depending on where the patch will live.
+    if (ks_asm(engine.get(), text.c_str(), static_cast<std::uint64_t>(baseAddress), &encoding, &encodingSize,
+               &statementCount) != 0) {
+        const auto code = ks_errno(engine.get());
+        return Bytes::fail(std::string("Assembly failed: ") + ks_strerror(code),
+                           static_cast<infra::ErrorCode>(code));
+    }
+
+    if (encoding == nullptr || encodingSize == 0) {
+        if (encoding != nullptr) {
+            ks_free(encoding);
+        }
+        return Bytes::fail("The assembler produced no bytes.");
+    }
+
+    std::vector<std::uint8_t> bytes(encoding, encoding + encodingSize);
+    ks_free(encoding);
+    return Bytes::ok(std::move(bytes));
 }
 
 } // namespace ire::engine_asm
-
