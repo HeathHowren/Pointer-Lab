@@ -15,7 +15,11 @@ env:
 jobs:
   build:
     name: Build and test (${{ matrix.config }})
-    runs-on: windows-latest
+    # Pinned, not windows-latest. The generator below names a specific toolset,
+    # so a runner-image roll forward removes the Visual Studio the configure
+    # step asks for and every job dies before compiling anything. This is also
+    # the toolset the release is actually verified against.
+    runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
@@ -84,7 +88,7 @@ jobs:
 
   analyze:
     name: Static analysis (non-blocking)
-    runs-on: windows-latest
+    runs-on: windows-2022
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
