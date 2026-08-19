@@ -29,10 +29,8 @@ std::filesystem::path Paths::crashFile() {
     return appData() / "crash.log";
 }
 
-std::filesystem::path Paths::fontsDir() {
-    std::array<wchar_t, MAX_PATH> buffer{};
-    GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    return std::filesystem::path(buffer.data()).parent_path() / "resources" / "fonts";
+std::filesystem::path Paths::crashDumpFile() {
+    return appData() / "crash.dmp";
 }
 
 } // namespace ire::infra
