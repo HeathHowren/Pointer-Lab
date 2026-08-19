@@ -19,6 +19,9 @@ public:
     void refresh();
 
     [[nodiscard]] bool attached() const;
+    // True when only a read-only handle could be obtained, so every write,
+    // freeze, patch and injection attempt will fail.
+    [[nodiscard]] bool readOnly() const;
     [[nodiscard]] std::uint32_t pid() const;
     [[nodiscard]] std::wstring processName() const;
     [[nodiscard]] HANDLE processHandle() const;
@@ -39,6 +42,7 @@ private:
     mutable std::mutex mutex_;
     platform_win32::UniqueHandle process_;
     std::uint32_t pid_{};
+    bool readOnly_{};
     std::wstring processName_;
     std::vector<ModuleInfo> modules_;
     std::vector<MemoryRegion> regions_;

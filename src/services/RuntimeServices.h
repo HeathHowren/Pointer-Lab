@@ -9,8 +9,11 @@
 #include "platform_win32/Win32Platform.h"
 #include "scripting/LuaScanner.h"
 
+#include <chrono>
 #include <map>
 #include <mutex>
+#include <string>
+#include <vector>
 
 namespace ire::services {
 
@@ -20,18 +23,36 @@ public:
     ~AddressListService();
 
     std::uint64_t add(std::uintptr_t address, domain::ValueType type, std::string description, std::string group);
+    // An entry backed by a pointer chain re-resolves its address as the target
+    // runs, so it keeps tracking the value across a restart.
+    std::uint64_t addChain(domain::PointerChain chain, domain::ValueType type, std::string description,
+                           std::string group);
     bool remove(std::uint64_t id);
     bool setFrozen(std::uint64_t id, bool frozen);
     bool updateValue(std::uint64_t id, const std::vector<std::uint8_t>& bytes);
     void toggleHotkey(const std::string& hotkey);
 
+    // Recomputes the address of every chain-backed entry. Runs automatically in
+    // the background; exposed so attaching can refresh immediately.
+    void resolvePointerChains();
+
 private:
     void freezeLoop(std::stop_token token);
+
+    // Twenty writes a second. Slower than this and a fast counter visibly
+    // fights back between writes; much faster and the freeze loop spends its
+    // time in WriteProcessMemory for no visible gain.
+    static constexpr int freezeIntervalMs = 50;
+    // Every 10th pass, so pointer chains re-resolve about twice a second.
+    static constexpr int resolveEveryTicks = 10;
 
     domain::TargetSession& session_;
     std::jthread worker_;
 };
 
+// A thin front for DebugEventPump. The pump owns the breakpoint table because
+// arming has to be interleaved with the single-step sequence that follows every
+// hit; keeping a second copy here is how the two used to disagree.
 class BreakpointService {
 public:
     explicit BreakpointService(domain::TargetSession& session);
@@ -41,16 +62,23 @@ public:
     void detachDebugger();
     infra::Result<void> addBreakpoint(std::uintptr_t address, std::string label);
     infra::Result<void> removeBreakpoint(std::uintptr_t address);
-    std::vector<domain::BreakpointInfo> breakpoints() const;
-    bool debuggerAttached() const;
+    [[nodiscard]] std::vector<domain::BreakpointInfo> breakpoints() const;
+    [[nodiscard]] bool debuggerAttached() const;
+
+    // Hits arrive on the pump thread, which must not touch the UI. The UI polls
+    // this once a frame instead. Rate limited, because a breakpoint inside a hot
+    // loop fires far faster than anyone can read; the hit counts in the
+    // breakpoint table are the authoritative record.
+    [[nodiscard]] std::vector<std::string> takeEvents();
 
 private:
-    void onBreakpointHit(std::uintptr_t address);
+    void queueEvent(std::string message, bool rateLimited);
 
     domain::TargetSession& session_;
-    mutable std::mutex mutex_;
     platform_win32::DebugEventPump debugPump_;
-    std::map<std::uintptr_t, domain::BreakpointInfo> breakpoints_;
+    mutable std::mutex mutex_;
+    std::vector<std::string> events_;
+    std::chrono::steady_clock::time_point lastEvent_{};
 };
 
 class RuntimeServices {

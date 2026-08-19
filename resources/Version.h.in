@@ -1,0 +1,24 @@
+#ifndef POINTERLAB_VERSION_H
+#define POINTERLAB_VERSION_H
+
+/* Generated from resources/Version.h.in by CMake configure_file. Do not edit. */
+
+#define POINTERLAB_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define POINTERLAB_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define POINTERLAB_VERSION_PATCH @PROJECT_VERSION_PATCH@
+
+#define POINTERLAB_VERSION_STRING "@PROJECT_VERSION@"
+#define POINTERLAB_PRODUCT_NAME  "Pointer Lab"
+#define POINTERLAB_COMPANY_NAME  "Pointer Lab"
+#define POINTERLAB_COPYRIGHT     "Licensed under the GNU General Public License v2.0"
+#define POINTERLAB_REPO_URL      "https://github.com/HeathHowren/Pointer-Lab"
+
+/* Comma-separated form for the RC VERSIONINFO block. */
+#define POINTERLAB_RC_VERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+
+#ifndef RC_INVOKED
+/* Wide form, for the Win32 calls that only take wchar_t. */
+#define POINTERLAB_VERSION_WIDE L"@PROJECT_VERSION@"
+#endif
+
+#endif /* POINTERLAB_VERSION_H */
