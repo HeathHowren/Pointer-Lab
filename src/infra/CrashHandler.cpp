@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cwchar>
 #include <exception>
 
@@ -67,18 +68,40 @@ bool writeMinidump(EXCEPTION_POINTERS* exceptionInfo) {
 
 // Deliberately uses the raw Win32 file API rather than the Logger: the Logger
 // takes a mutex, and the crashing thread may already hold it.
-void appendCrashLine(const char* text) {
+//
+// Opening the crash log is the one step here that touches a file the rest of the
+// machine can see too. Real-time antivirus scans a file when it is closed, and
+// that scan holds it open; an open landing inside the window comes back
+// ERROR_SHARING_VIOLATION. So retry briefly, and share widely enough that a
+// reader can never be the reason a crash report is lost.
+HANDLE openCrashLog() {
     if (g_logPath[0] == L'\0') {
-        return;
+        return INVALID_HANDLE_VALUE;
     }
-    HANDLE file = CreateFileW(g_logPath, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        const HANDLE file = CreateFileW(g_logPath, FILE_APPEND_DATA,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            return file;
+        }
+        if (GetLastError() != ERROR_SHARING_VIOLATION) {
+            return INVALID_HANDLE_VALUE;
+        }
+        Sleep(25);
+    }
+    return INVALID_HANDLE_VALUE;
+}
+
+// Returns false when the line did not reach the file, so the caller can stop
+// telling the user to attach a log that was never written.
+bool appendCrashLine(HANDLE file, const char* text) {
     if (file == INVALID_HANDLE_VALUE) {
-        return;
+        return false;
     }
+    const auto length = static_cast<DWORD>(std::strlen(text));
     DWORD written{};
-    WriteFile(file, text, static_cast<DWORD>(strlen(text)), &written, nullptr);
-    CloseHandle(file);
+    return WriteFile(file, text, length, &written, nullptr) != FALSE && written == length;
 }
 
 void report(const wchar_t* what, EXCEPTION_POINTERS* exceptionInfo) {
@@ -101,10 +124,20 @@ void report(const wchar_t* what, EXCEPTION_POINTERS* exceptionInfo) {
                       " crash (no exception record, thread %lu) ---\r\n",
                       GetCurrentThreadId());
     }
-    appendCrashLine(line);
+    // One handle, held open across the minidump write. The previous code opened
+    // the log twice, and the second open sat immediately after a freshly closed
+    // .dmp -- precisely when an antivirus scan of that .dmp is most likely to be
+    // touching the folder. That open could fail, the failure was discarded, and
+    // the crash line vanished with no trace that anything had gone wrong.
+    const HANDLE log = openCrashLog();
+    bool logged = appendCrashLine(log, line);
 
     const bool dumped = writeMinidump(exceptionInfo);
-    appendCrashLine(dumped ? "minidump written\r\n" : "minidump could NOT be written\r\n");
+    logged = appendCrashLine(log, dumped ? "minidump written\r\n" : "minidump could NOT be written\r\n") && logged;
+
+    if (log != INVALID_HANDLE_VALUE) {
+        CloseHandle(log);
+    }
 
     if (!g_interactive.load()) {
         return;
@@ -118,7 +151,7 @@ void report(const wchar_t* what, EXCEPTION_POINTERS* exceptionInfo) {
                  L"Please attach these files if you report this.",
                  what,
                  dumped ? g_dumpPath : L"(a crash dump could not be written)",
-                 g_logPath,
+                 logged ? g_logPath : L"(the crash log could not be written)",
                  g_enginePath);
     MessageBoxW(nullptr, g_message, L"Pointer Lab crashed", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
 }

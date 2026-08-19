@@ -125,6 +125,10 @@ TEST_CASE("An uncaught C++ exception produces a minidump", "[crash]") {
 
     REQUIRE(std::filesystem::exists(scratch.dump()));
     CHECK(std::filesystem::file_size(scratch.dump()) > 4096);
+    // Checked separately from the contents: a missing file and a file missing
+    // one line both used to surface as "npos != npos", which says nothing about
+    // which of the two happened.
+    REQUIRE(std::filesystem::exists(scratch.log()));
     CHECK(readAll(scratch.log()).find("minidump written") != std::string::npos);
 }
 
@@ -136,6 +140,7 @@ TEST_CASE("An invalid CRT parameter produces a minidump", "[crash]") {
     REQUIRE(exitCode != -1);
 
     REQUIRE(std::filesystem::exists(scratch.dump()));
+    REQUIRE(std::filesystem::exists(scratch.log()));
     CHECK(readAll(scratch.log()).find("minidump written") != std::string::npos);
 }
 
