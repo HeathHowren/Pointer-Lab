@@ -4,6 +4,9 @@ A Windows x64 user-mode memory research tool built in C++20 with a Dear ImGui do
 
 ![Pointer Lab](docs/screenshot.png)
 
+*Attached to the bundled test helper, after an exact scan for a known i32. The
+memory view shows the same address: `34 12 FE 5A` is `0x5AFE1234` little-endian.*
+
 Pointer Lab attaches to a running 64-bit process, searches its memory for values,
 tracks the addresses it finds, and lets you read, write, freeze, disassemble and
 patch them. It is a research and learning tool — see
