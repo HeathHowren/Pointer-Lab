@@ -91,6 +91,15 @@ All notable changes to Pointer Lab are recorded here. This project follows
   scan carried on in the background, so Stop did not stop the work, and the
   results turned up in the next script that looked.
 
+### Internal
+
+- **`UiApp.cpp` is split into nine files grouped by area.** It was a single
+  2500-line file, roughly five times the size of the next largest, and the one
+  component with no test coverage. The class and its header are unchanged and
+  every panel is still one method; only which file each lives in has moved. The
+  helpers the panels share moved from an anonymous namespace into
+  `src/ui/UiInternal.h`.
+
 ## [2.0.0] — 2026-08-18
 
 The first release intended for real use. The alpha built and ran, but a number
