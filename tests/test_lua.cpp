@@ -99,6 +99,137 @@ TEST_CASE("The console is usable again after a cancelled script", "[lua]") {
     CHECK(output[0] == "still here");
 }
 
+namespace {
+
+// Cancels a running script and waits for it to actually stop.
+bool cancelAndWait(scripting::LuaConsole& console, std::chrono::seconds timeout = std::chrono::seconds(5)) {
+    console.cancel();
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (console.running() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return !console.running();
+}
+
+} // namespace
+
+// Cancelling used to raise a Lua error, which pcall catches like any other. The
+// flag stayed set, so a loop that caught it just kept erroring every 10 000
+// instructions and never stopped -- and a runaway loop is exactly what the Stop
+// button is for. Each of these swallows errors as hard as it can.
+TEST_CASE("A script cannot pcall its way out of being cancelled", "[lua][cancel]") {
+    Console fixture;
+
+    SECTION("a loop that catches every error and carries on") {
+        REQUIRE(fixture.console.submit("while true do pcall(function() error('nope') end) end"));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        REQUIRE(fixture.console.running());
+        CHECK(cancelAndWait(fixture.console));
+    }
+    SECTION("a bare pcall around an infinite loop") {
+        REQUIRE(fixture.console.submit("while true do pcall(function() while true do end end) end"));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        REQUIRE(fixture.console.running());
+        CHECK(cancelAndWait(fixture.console));
+    }
+    SECTION("xpcall with a handler that ignores everything") {
+        REQUIRE(fixture.console.submit(
+            "while true do xpcall(function() while true do end end, function() return 'ignored' end) end"));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        REQUIRE(fixture.console.running());
+        CHECK(cancelAndWait(fixture.console));
+    }
+
+    // And the console still works afterwards, so a hard stop does not cost the
+    // user their session.
+    (void)fixture.console.takeOutput();
+    const auto output = run(fixture.console, "print('still here')");
+    REQUIRE(output.size() == 1);
+    CHECK(output[0] == "still here");
+}
+
+TEST_CASE("A script can see that it has been cancelled", "[lua][cancel]") {
+    Console fixture;
+
+    SECTION("cancelled() is false while the script is running normally") {
+        const auto output = run(fixture.console, "print(tostring(cancelled()))");
+        REQUIRE(output.size() == 1);
+        CHECK(output[0] == "false");
+    }
+    SECTION("check_cancel stops a loop that would otherwise never end") {
+        // The loop only leaves through check_cancel: there is no other exit.
+        REQUIRE(fixture.console.submit("while true do check_cancel() end"));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        REQUIRE(fixture.console.running());
+        CHECK(cancelAndWait(fixture.console));
+    }
+    SECTION("check_cancel cannot be caught either") {
+        REQUIRE(fixture.console.submit("while true do pcall(check_cancel) end"));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        REQUIRE(fixture.console.running());
+        CHECK(cancelAndWait(fixture.console));
+    }
+}
+
+// Stop used to stop the script but not the scan it had set going, so the work
+// carried on in the background and the next script inherited its results.
+TEST_CASE("Cancelling a script also cancels the scan it started", "[lua][cancel][integration]") {
+    HelperProcess helper;
+    REQUIRE(helper.ready());
+
+    Console fixture;
+    const auto script = "attach(" + std::to_string(helper.pid()) +
+                        ")\n"
+                        "scan_unknown('i32')\n"
+                        "scan_wait()\n"
+                        "print('finished')\n";
+    REQUIRE(fixture.console.submit(script));
+
+    // Let the scan get going before pulling the rug out.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    REQUIRE(cancelAndWait(fixture.console, std::chrono::seconds(20)));
+
+    // The scan is stopped too, not merely orphaned.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (fixture.services.scanJob().progress().running && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK_FALSE(fixture.services.scanJob().progress().running);
+    CHECK_FALSE(anyContains(fixture.console.takeOutput(), "finished"));
+}
+
+// loadlibrary used to return the remote thread's exit code, which is only the
+// low 32 bits of the module handle: a number that looks like an address on a
+// 64-bit target but is not one.
+TEST_CASE("loadlibrary reports the module's real base, not a truncated handle", "[lua][integration]") {
+    HelperProcess helper;
+    REQUIRE(helper.ready());
+
+    Console fixture;
+    const auto script = "attach(" + std::to_string(helper.pid()) +
+                        ")\n"
+                        "local ok, base = loadlibrary('winmm.dll')\n"
+                        "if not ok then print('LOADFAIL ' .. tostring(base)) return end\n"
+                        "local listed = nil\n"
+                        "for _, m in ipairs(modules()) do\n"
+                        "  if m.name:lower() == 'winmm.dll' then listed = m.base end\n"
+                        "end\n"
+                        "if listed == nil then print('NOTLISTED')\n"
+                        "elseif listed == base then print('MATCH ' .. string.format('%X', base))\n"
+                        "else print(string.format('MISMATCH %X vs %X', base, listed)) end\n";
+
+    const auto output = run(fixture.console, script);
+    REQUIRE_FALSE(output.empty());
+    INFO("script said: " << output.front());
+
+    if (anyContains(output, "LOADFAIL")) {
+        SKIP("winmm.dll could not be injected on this machine.");
+    }
+    // The base loadlibrary hands back is the one the module list reports, which
+    // is the whole point: it is usable as an address.
+    CHECK(anyContains(output, "MATCH"));
+}
+
 TEST_CASE("Only one script runs at a time", "[lua]") {
     Console fixture;
     REQUIRE(fixture.console.submit("while true do end"));

@@ -65,6 +65,8 @@ private:
     static int l_scan_next(lua_State* state);
     static int l_scan_status(lua_State* state);
     static int l_scan_wait(lua_State* state);
+    static int l_cancelled(lua_State* state);
+    static int l_check_cancel(lua_State* state);
     static int l_scan_results(lua_State* state);
     static int l_resolve(lua_State* state);
     static int l_add_address(lua_State* state);

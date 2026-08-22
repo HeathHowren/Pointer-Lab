@@ -4,8 +4,11 @@
 #include "engine_pointer/PointerScanner.h"
 #include "infra/Logger.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <cwctype>
+#include <filesystem>
 #include <sstream>
 
 namespace ire::scripting {
@@ -15,6 +18,14 @@ namespace {
 // How many VM instructions run between cancel checks. Small enough that a
 // runaway loop stops the moment it is asked, large enough not to matter.
 constexpr int hookInterval = 10000;
+
+// Windows module names are case-insensitive, and the case a script passes a path
+// in need not match what the loader reports.
+bool sameFileName(const std::wstring& left, const std::wstring& right) {
+    return left.size() == right.size() &&
+           std::equal(left.begin(), left.end(), right.begin(),
+                      [](wchar_t a, wchar_t b) { return std::towlower(a) == std::towlower(b); });
+}
 
 template <typename T>
 std::vector<std::uint8_t> pack(T value) {
@@ -140,6 +151,10 @@ bool LuaConsole::submit(const std::string& code) {
 
 void LuaConsole::cancel() {
     cancel_ = true;
+    // A script that started a scan and was then stopped used to leave the scan
+    // running in the background, so Stop stopped the script but not the work it
+    // had set going -- and the next script inherited its results.
+    services_.scanJob().cancel();
 }
 
 std::vector<std::string> LuaConsole::takeOutput() {
@@ -148,35 +163,57 @@ std::vector<std::string> LuaConsole::takeOutput() {
 }
 
 void LuaConsole::execute(std::string code) {
-    // The hook is what makes cancellation possible at all.
-    lua_sethook(state_, &LuaConsole::countHook, LUA_MASKCOUNT, hookInterval);
+    // The script runs on its own coroutine rather than directly on the main
+    // state, and that is what makes Stop actually stop it.
+    //
+    // Cancelling used to raise a Lua error from the hook, which pcall catches
+    // like any other. "while true do pcall(f) end" swallowed the cancel and kept
+    // running, erroring again every 10 000 instructions forever -- and a runaway
+    // loop is precisely what the Stop button exists for. A yield cannot be
+    // caught: pcall passes it straight through to lua_resume. So the hook yields
+    // instead, and a cancelled coroutine is simply never resumed.
+    lua_State* thread = lua_newthread(state_);
+    const int threadIndex = lua_gettop(state_);
 
-    lua_pushcfunction(state_, &LuaConsole::traceback);
-    const int handler = lua_gettop(state_);
-
-    if (luaL_loadstring(state_, code.c_str()) != LUA_OK) {
-        appendOutput(lua_tostring(state_, -1));
-        lua_pop(state_, 2); // error message and handler
-    } else if (lua_pcall(state_, 0, LUA_MULTRET, handler) != LUA_OK) {
-        const char* message = lua_tostring(state_, -1);
-        appendOutput(message != nullptr ? message : "Script failed with a non-string error.");
-        lua_pop(state_, 1);
-        lua_remove(state_, handler);
-    } else {
-        // Anything the chunk returned is left on the stack; clear back to the
-        // handler so the state does not grow across runs.
-        lua_settop(state_, handler - 1);
+    if (luaL_loadstring(thread, code.c_str()) != LUA_OK) {
+        const char* message = lua_tostring(thread, -1);
+        appendOutput(message != nullptr ? message : "The script could not be compiled.");
+        lua_settop(state_, threadIndex - 1);
+        running_ = false;
+        return;
     }
 
-    lua_sethook(state_, nullptr, 0, 0);
+    lua_sethook(thread, &LuaConsole::countHook, LUA_MASKCOUNT, hookInterval);
+
+    int results = 0;
+    const int status = lua_resume(thread, state_, 0, &results);
+
+    if (status == LUA_YIELD) {
+        // Nothing in the API yields, so this is the cancel hook and only the
+        // cancel hook.
+        appendOutput("Script cancelled.");
+    } else if (status != LUA_OK) {
+        const char* message = lua_tostring(thread, -1);
+        // Built against the coroutine's stack, or the traceback describes this
+        // function instead of the script that actually failed.
+        luaL_traceback(state_, thread, message != nullptr ? message : "Script failed with a non-string error.", 0);
+        const char* trace = lua_tostring(state_, -1);
+        appendOutput(trace != nullptr ? trace : "Script failed with a non-string error.");
+        lua_pop(state_, 1);
+    }
+
+    // Drops the coroutine along with anything the chunk returned. A cancelled
+    // one is left suspended and collected; it is never resumed again.
+    lua_settop(state_, threadIndex - 1);
     running_ = false;
 }
 
 void LuaConsole::countHook(lua_State* state, lua_Debug*) {
     auto* console = fromState(state);
     if (console != nullptr && console->cancel_.load(std::memory_order_relaxed)) {
-        // Unwinds the interpreter back to the pcall in execute().
-        luaL_error(state, "Script cancelled.");
+        // Yields rather than raising, so a pcall in the script cannot swallow
+        // it. lua_yield does not return: it unwinds to lua_resume in execute().
+        lua_yield(state, 0);
     }
 }
 
@@ -228,6 +265,8 @@ void LuaConsole::registerApi() {
     pushFunction(state_, this, "scan_status", &LuaConsole::l_scan_status);
     pushFunction(state_, this, "scan_wait", &LuaConsole::l_scan_wait);
     pushFunction(state_, this, "scan_results", &LuaConsole::l_scan_results);
+    pushFunction(state_, this, "cancelled", &LuaConsole::l_cancelled);
+    pushFunction(state_, this, "check_cancel", &LuaConsole::l_check_cancel);
     pushFunction(state_, this, "resolve", &LuaConsole::l_resolve);
     pushFunction(state_, this, "add_address", &LuaConsole::l_add_address);
     pushFunction(state_, this, "alloc", &LuaConsole::l_alloc);
@@ -506,6 +545,23 @@ int LuaConsole::l_scan_status(lua_State* state) {
     return 1;
 }
 
+int LuaConsole::l_cancelled(lua_State* state) {
+    auto* console = self(state);
+    lua_pushboolean(state, console->cancel_.load(std::memory_order_relaxed) ? 1 : 0);
+    return 1;
+}
+
+int LuaConsole::l_check_cancel(lua_State* state) {
+    auto* console = self(state);
+    if (console->cancel_.load(std::memory_order_relaxed)) {
+        // Same mechanism as the hook, so this cannot be caught either. A script
+        // that could pcall its way past its own cancellation check would make
+        // the function pointless.
+        lua_yield(state, 0);
+    }
+    return 0;
+}
+
 int LuaConsole::l_scan_wait(lua_State* state) {
     auto* console = self(state);
     const auto timeoutMs = static_cast<long long>(luaL_optinteger(state, 1, 60000));
@@ -515,7 +571,10 @@ int LuaConsole::l_scan_wait(lua_State* state) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     while (console->services_.scanJob().progress().running) {
         if (console->cancel_.load(std::memory_order_relaxed)) {
-            return luaL_error(state, "Script cancelled.");
+            // Yields rather than raising, for the same reason the hook does: an
+            // error here is catchable, and a script that pcalls around its wait
+            // would carry on running after the user pressed Stop.
+            lua_yield(state, 0);
         }
         if (std::chrono::steady_clock::now() >= deadline) {
             lua_pushboolean(state, 0);
@@ -628,13 +687,31 @@ int LuaConsole::l_thread(lua_State* state) {
 int LuaConsole::l_loadlibrary(lua_State* state) {
     auto* console = self(state);
     const char* path = luaL_checkstring(state, 1);
-    auto result = console->services_.injector().loadLibrary(domain::widen(path));
+    const auto wide = domain::widen(path);
+
+    auto result = console->services_.injector().loadLibrary(wide);
     lua_pushboolean(state, result.has_value());
-    if (result) {
-        lua_pushinteger(state, result.value());
+    if (!result) {
+        lua_pushstring(state, result.error().c_str());
         return 2;
     }
-    lua_pushstring(state, result.error().c_str());
+
+    // The remote thread's exit code is only the low 32 bits of the module
+    // handle, so on a 64-bit target it is a truncated value that looks like an
+    // address but is not one. The module list knows the real base; refreshing it
+    // is also what makes the newly loaded DLL visible to modules() at all.
+    console->services_.session().refresh();
+    const auto fileName = std::filesystem::path(wide).filename().wstring();
+    for (const auto& module : console->services_.session().modules()) {
+        if (sameFileName(module.name, fileName)) {
+            lua_pushinteger(state, static_cast<lua_Integer>(module.base));
+            return 2;
+        }
+    }
+
+    // The DLL did load; we just could not find it afterwards. Report the exit
+    // code rather than claiming a failure that did not happen.
+    lua_pushinteger(state, result.value());
     return 2;
 }
 
