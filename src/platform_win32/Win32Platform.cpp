@@ -409,6 +409,59 @@ constexpr std::uint8_t int3 = 0xCC;
 // EFLAGS.TF. Set it and the CPU raises a single-step exception after exactly
 // one instruction, which is how a breakpoint gets re-armed behind itself.
 constexpr DWORD trapFlag = 0x100;
+// EFLAGS.RF. An execute breakpoint faults *before* the instruction runs, so
+// resuming without this re-faults on the same instruction forever. RF suppresses
+// instruction breakpoints for exactly one instruction and the CPU clears it
+// again afterwards.
+constexpr DWORD resumeFlag = 0x10000;
+// There are four of them, and that is a property of the CPU.
+constexpr int debugSlotCount = 4;
+// DR6 bits 0-3: which debug register caused this exception.
+constexpr DWORD64 debugStatusMask = 0xF;
+
+// DR7 R/W encoding for a slot: what kind of access the CPU should trap.
+// 10 is I/O access, which needs DE in CR4 and is no use here.
+DWORD64 readWriteBits(domain::BreakpointKind kind) {
+    switch (kind) {
+    case domain::BreakpointKind::HardwareWrite: return 0b01;
+    case domain::BreakpointKind::HardwareReadWrite: return 0b11;
+    case domain::BreakpointKind::HardwareExecute:
+    case domain::BreakpointKind::Software: break;
+    }
+    return 0b00;
+}
+
+// DR7 LEN encoding. Note that 8 bytes is 0b10, out of numeric order.
+DWORD64 lengthBits(std::uint8_t length) {
+    switch (length) {
+    case 2: return 0b01;
+    case 8: return 0b10;
+    case 4: return 0b11;
+    default: return 0b00;
+    }
+}
+
+// Enumerates the target's threads. The debug registers are per-thread, so every
+// one of them has to be programmed for a breakpoint to be reliable.
+std::vector<std::uint32_t> threadIdsOf(std::uint32_t pid) {
+    std::vector<std::uint32_t> ids;
+    UniqueHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0));
+    if (!snapshot) {
+        return ids;
+    }
+    THREADENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    if (!Thread32First(snapshot.get(), &entry)) {
+        return ids;
+    }
+    do {
+        if (entry.th32OwnerProcessID == pid) {
+            ids.push_back(entry.th32ThreadID);
+        }
+    } while (Thread32Next(snapshot.get(), &entry));
+    return ids;
+}
+
 // How long detach() keeps pumping to let threads finish a step already in
 // progress, rather than abandoning them with the trap flag still set.
 constexpr auto drainTimeout = std::chrono::seconds(2);
@@ -477,6 +530,7 @@ void DebugEventPump::detach() {
     std::scoped_lock lock(mutex_);
     breakpoints_.clear();
     stepping_.clear();
+    hardwareUsed_ = false;
 }
 
 void DebugEventPump::run(std::promise<infra::Result<void>> ready) {
@@ -580,6 +634,23 @@ void DebugEventPump::loop() {
                 CloseHandle(event.u.CreateProcessInfo.hFile);
             }
             break;
+        case CREATE_THREAD_DEBUG_EVENT: {
+            // Debug registers are per-thread, so a thread created after a
+            // hardware breakpoint was set starts with none and the breakpoint
+            // simply would not exist on it. The thread is still suspended until
+            // we continue this event, which makes now the moment to program it.
+            // The handle belongs to the system; unlike hFile it is not ours to
+            // close.
+            std::scoped_lock lock(mutex_);
+            if (anyHardwareArmed() && event.u.CreateThread.hThread != nullptr &&
+                !writeDebugRegisters(event.u.CreateThread.hThread)) {
+                infra::Logger::instance().warn("Could not program the debug registers of new thread " +
+                                               std::to_string(event.dwThreadId) +
+                                               "; hardware breakpoints will not fire on it: " +
+                                               Win32Platform::formatLastError());
+            }
+            break;
+        }
         case LOAD_DLL_DEBUG_EVENT:
             if (event.u.LoadDll.hFile != nullptr) {
                 CloseHandle(event.u.LoadDll.hFile);
@@ -622,6 +693,85 @@ bool DebugEventPump::rewindThread(std::uintptr_t address, std::uint32_t threadId
     }
     context.Rip = address;
     return SetThreadContext(thread.get(), &context) != FALSE;
+}
+
+bool DebugEventPump::anyHardwareArmed() const {
+    return std::any_of(breakpoints_.begin(), breakpoints_.end(), [](const auto& pair) {
+        return domain::isHardware(pair.second.kind) && pair.second.enabled;
+    });
+}
+
+int DebugEventPump::freeDebugSlot() const {
+    std::array<bool, debugSlotCount> taken{};
+    for (const auto& [address, info] : breakpoints_) {
+        if (domain::isHardware(info.kind) && info.slot >= 0 && info.slot < debugSlotCount) {
+            taken[static_cast<std::size_t>(info.slot)] = true;
+        }
+    }
+    for (int slot = 0; slot < debugSlotCount; ++slot) {
+        if (!taken[static_cast<std::size_t>(slot)]) {
+            return slot;
+        }
+    }
+    return -1;
+}
+
+bool DebugEventPump::writeDebugRegisters(HANDLE thread) const {
+    CONTEXT context{};
+    context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    if (!GetThreadContext(thread, &context)) {
+        return false;
+    }
+
+    std::array<DWORD64, debugSlotCount> addresses{};
+    DWORD64 control = 0;
+    for (const auto& [address, info] : breakpoints_) {
+        if (!domain::isHardware(info.kind) || !info.enabled || info.slot < 0 || info.slot >= debugSlotCount) {
+            continue;
+        }
+        const auto slot = static_cast<std::size_t>(info.slot);
+        addresses[slot] = address;
+        // Local enable. Global enable would survive a task switch, which is not
+        // ours to impose on the whole machine.
+        control |= DWORD64{1} << (slot * 2);
+        control |= readWriteBits(info.kind) << (16 + slot * 4);
+        control |= lengthBits(info.length) << (18 + slot * 4);
+    }
+
+    context.Dr0 = addresses[0];
+    context.Dr1 = addresses[1];
+    context.Dr2 = addresses[2];
+    context.Dr3 = addresses[3];
+    // Stale status bits would make the next exception look like a hit from a
+    // register that has since been reused.
+    context.Dr6 = 0;
+    context.Dr7 = control;
+    context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    return SetThreadContext(thread, &context) != FALSE;
+}
+
+void DebugEventPump::applyDebugRegistersToAllThreads() const {
+    for (const auto threadId : threadIdsOf(pid_)) {
+        UniqueHandle thread(
+            OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, threadId));
+        if (!thread) {
+            infra::Logger::instance().warn("Could not open thread " + std::to_string(threadId) +
+                                           " to program its debug registers; a hardware breakpoint will not fire on "
+                                           "it: " + Win32Platform::formatLastError());
+            continue;
+        }
+        // Reading a running thread's context returns whatever the kernel last
+        // saved for it, which is not necessarily current. Suspending first is
+        // what makes the read-modify-write meaningful.
+        const bool suspended = SuspendThread(thread.get()) != static_cast<DWORD>(-1);
+        if (!writeDebugRegisters(thread.get())) {
+            infra::Logger::instance().warn("Could not program the debug registers of thread " +
+                                           std::to_string(threadId) + ": " + Win32Platform::formatLastError());
+        }
+        if (suspended) {
+            ResumeThread(thread.get());
+        }
+    }
 }
 
 bool DebugEventPump::handleBreakpoint(std::uintptr_t address, std::uint32_t threadId) {
@@ -695,13 +845,111 @@ bool DebugEventPump::handleBreakpoint(std::uintptr_t address, std::uint32_t thre
 }
 
 bool DebugEventPump::handleSingleStep(std::uint32_t threadId) {
-    std::scoped_lock lock(mutex_);
+    domain::BreakpointInfo snapshot;
+    bool hardwareHit = false;
+    bool handled = false;
 
-    auto stepping = stepping_.find(threadId);
-    if (stepping == stepping_.end()) {
-        // Not one of ours; the target is single-stepping itself.
-        return false;
+    {
+        std::scoped_lock lock(mutex_);
+
+        // A debug register fires as a single-step exception, so this is also the
+        // hardware breakpoint path. DR6 names the register that caused it;
+        // without asking, a watchpoint hit looks like the target stepping itself
+        // and gets passed straight through, which kills it.
+        if (hardwareUsed_) {
+            const auto verdict = handleHardwareHit(threadId, snapshot);
+            hardwareHit = verdict == HardwareVerdict::Hit;
+            handled = verdict != HardwareVerdict::NotOurs;
+        }
+
+        if (auto stepping = stepping_.find(threadId); stepping != stepping_.end()) {
+            handled = handleSoftwareStep(stepping) || handled;
+        }
+
+        // Nothing claimed it, but debug registers were in use at some point in
+        // this attach. A trap that was already in flight when its register was
+        // cleared arrives with DR6 wiped and no owner to match, which is exactly
+        // this case -- and it is the shape of the bug that used to kill the
+        // target on detach. Swallowing somebody else's single step costs
+        // nothing; passing ours on is a certain kill.
+        if (!handled && hardwareUsed_) {
+            handled = true;
+        }
     }
+
+    // Called without the lock: the callback reaches into the UI, which takes
+    // locks of its own.
+    if (hardwareHit && onHit_) {
+        onHit_(snapshot);
+    }
+    return handled;
+}
+
+// Both halves below expect mutex_ to be held.
+
+DebugEventPump::HardwareVerdict DebugEventPump::handleHardwareHit(std::uint32_t threadId,
+                                                                  domain::BreakpointInfo& snapshot) {
+    UniqueHandle thread(OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, threadId));
+    if (!thread) {
+        return HardwareVerdict::NotOurs;
+    }
+
+    CONTEXT context{};
+    context.ContextFlags = CONTEXT_DEBUG_REGISTERS | CONTEXT_CONTROL | CONTEXT_INTEGER;
+    if (!GetThreadContext(thread.get(), &context)) {
+        return HardwareVerdict::NotOurs;
+    }
+
+    const DWORD64 fired = context.Dr6 & debugStatusMask;
+    if (fired == 0) {
+        // A real single step, or somebody else's. Not ours to claim.
+        return HardwareVerdict::NotOurs;
+    }
+
+    domain::BreakpointInfo* hit = nullptr;
+    for (auto& [address, info] : breakpoints_) {
+        if (!domain::isHardware(info.kind) || !info.enabled || info.slot < 0) {
+            continue;
+        }
+        if ((fired & (DWORD64{1} << static_cast<unsigned>(info.slot))) != 0) {
+            hit = &info;
+            break;
+        }
+    }
+    if (hit == nullptr) {
+        // A register we no longer own reported in: the trap was raised before
+        // the breakpoint was removed and its exception arrived afterwards. Still
+        // ours, so still swallowed -- and the status bits have to be cleared or
+        // it reports again on every later exception.
+        context.Dr6 = 0;
+        context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        SetThreadContext(thread.get(), &context);
+        return HardwareVerdict::Stale;
+    }
+
+    captureRegisters(context, threadId, hit->lastHit);
+    hit->hitCount += 1;
+    snapshot = *hit;
+
+    // An execute breakpoint faults before the instruction runs, so resuming
+    // as-is would fault on it again immediately and the target would never make
+    // progress. A data breakpoint traps after the access and needs none of this.
+    context.Dr6 = 0;
+    if (hit->kind == domain::BreakpointKind::HardwareExecute) {
+        context.EFlags |= resumeFlag;
+        context.ContextFlags = CONTEXT_DEBUG_REGISTERS | CONTEXT_CONTROL;
+    } else {
+        context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    }
+    if (!SetThreadContext(thread.get(), &context)) {
+        infra::Logger::instance().error("A hardware breakpoint at " + domain::toHex(hit->address) +
+                                        " was hit but its thread could not be resumed cleanly: " +
+                                        Win32Platform::formatLastError());
+    }
+    return HardwareVerdict::Hit;
+}
+
+bool DebugEventPump::handleSoftwareStep(std::map<std::uint32_t, std::uintptr_t>::iterator stepping) {
     const auto address = stepping->second;
     stepping_.erase(stepping);
 
@@ -719,7 +967,8 @@ bool DebugEventPump::handleSingleStep(std::uint32_t threadId) {
     return true;
 }
 
-infra::Result<void> DebugEventPump::addBreakpoint(std::uintptr_t address, std::string label) {
+infra::Result<void> DebugEventPump::addBreakpoint(std::uintptr_t address, std::string label,
+                                                  domain::BreakpointKind kind, std::uint8_t length) {
     if (!attached_) {
         return infra::Result<void>::fail("The debugger is not attached.");
     }
@@ -727,6 +976,10 @@ infra::Result<void> DebugEventPump::addBreakpoint(std::uintptr_t address, std::s
     std::scoped_lock lock(mutex_);
     if (breakpoints_.count(address) != 0) {
         return infra::Result<void>::fail("There is already a breakpoint at " + domain::toHex(address) + ".");
+    }
+
+    if (domain::isHardware(kind)) {
+        return addHardwareBreakpoint(address, std::move(label), kind, length);
     }
 
     auto original = readByte(address);
@@ -755,12 +1008,59 @@ infra::Result<void> DebugEventPump::addBreakpoint(std::uintptr_t address, std::s
     return infra::Result<void>::ok();
 }
 
+infra::Result<void> DebugEventPump::addHardwareBreakpoint(std::uintptr_t address, std::string label,
+                                                          domain::BreakpointKind kind, std::uint8_t length) {
+    // Execute breakpoints trap an instruction fetch, which is one byte by
+    // definition; only a data breakpoint has a width to choose.
+    if (kind == domain::BreakpointKind::HardwareExecute) {
+        length = 1;
+    }
+    if (!domain::isValidWatchLength(length)) {
+        return infra::Result<void>::fail("A hardware breakpoint can watch 1, 2, 4 or 8 bytes, not " +
+                                         std::to_string(length) + ".");
+    }
+    if (address % length != 0) {
+        return infra::Result<void>::fail("A " + std::to_string(length) + "-byte hardware breakpoint must watch an " +
+                                         std::to_string(length) + "-byte aligned address, and " +
+                                         domain::toHex(address) + " is not.");
+    }
+
+    const int slot = freeDebugSlot();
+    if (slot < 0) {
+        return infra::Result<void>::fail(
+            "All four debug registers are in use. The processor provides exactly four hardware breakpoints; "
+            "remove one, or use a software breakpoint instead.");
+    }
+
+    domain::BreakpointInfo info;
+    info.address = address;
+    info.enabled = true;
+    info.label = std::move(label);
+    info.kind = kind;
+    info.length = length;
+    info.slot = slot;
+    breakpoints_.emplace(address, std::move(info));
+    hardwareUsed_ = true;
+
+    // Programmed from the table, which now includes the new entry.
+    applyDebugRegistersToAllThreads();
+    return infra::Result<void>::ok();
+}
+
 infra::Result<void> DebugEventPump::removeBreakpoint(std::uintptr_t address) {
     std::scoped_lock lock(mutex_);
 
     auto entry = breakpoints_.find(address);
     if (entry == breakpoints_.end()) {
         return infra::Result<void>::fail("There is no breakpoint at " + domain::toHex(address) + ".");
+    }
+
+    // Nothing was written into the target, so removal is just giving the debug
+    // register back and reprogramming every thread from the table.
+    if (domain::isHardware(entry->second.kind)) {
+        breakpoints_.erase(entry);
+        applyDebugRegistersToAllThreads();
+        return infra::Result<void>::ok();
     }
 
     // Erase first: if a thread is mid-step over this address, handleSingleStep
@@ -796,7 +1096,13 @@ std::vector<domain::BreakpointInfo> DebugEventPump::breakpoints() const {
 
 void DebugEventPump::disarmAll() {
     std::scoped_lock lock(mutex_);
+    const bool hadHardware = anyHardwareArmed();
+
     for (const auto& [address, info] : breakpoints_) {
+        if (domain::isHardware(info.kind)) {
+            // Nothing to write back: it never touched the target's memory.
+            continue;
+        }
         // A thread stepping over this one already has the original byte back.
         const bool steppingOver = std::any_of(stepping_.begin(), stepping_.end(),
                                               [addr = address](const auto& pair) { return pair.second == addr; });
@@ -809,6 +1115,13 @@ void DebugEventPump::disarmAll() {
         disarmed_.insert(address);
     }
     breakpoints_.clear();
+
+    // Now that the table is empty this writes zeroed registers, which is what
+    // hands the debug registers back. Leaving them set would keep faulting a
+    // target that no longer has a debugger to field the exceptions.
+    if (hadHardware) {
+        applyDebugRegistersToAllThreads();
+    }
 }
 
 void DebugEventPump::drainPendingEvents() {

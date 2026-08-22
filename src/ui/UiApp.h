@@ -157,6 +157,9 @@ private:
 
     std::array<char, 64> breakpointAddress_{};
     std::array<char, 128> breakpointLabel_{};
+    int breakpointKindIndex_{};
+    // Index into {1, 2, 4, 8}; 4 bytes is the common case.
+    int breakpointWidthIndex_{2};
 
     std::array<char, 64> pointerTarget_{};
     int pointerDepth_{3};

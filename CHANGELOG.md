@@ -22,6 +22,19 @@ All notable changes to Pointer Lab are recorded here. This project follows
   Cancelling a rescan also leaves the chains untouched, because a half-applied
   filter is not a result set.
 
+- **Hardware breakpoints and watchpoints.** A breakpoint can now use one of the
+  processor's four debug registers instead of an `int3`. Nothing in the target is
+  modified and nothing is ever disarmed, which closes the window a software
+  breakpoint can be missed through: another thread running the address while the
+  original byte is temporarily back no longer slips past. They also break on
+  **data** rather than only on code — watch an address for writes, or for reads
+  and writes, in widths of 1, 2, 4 or 8 bytes.
+
+  There are exactly four, because the processor has four debug registers. The
+  fifth is refused with a message that says so rather than silently displacing
+  one, and the breakpoint table names the register each one holds. Software
+  breakpoints are unchanged and remain the default.
+
 ## [2.0.0] — 2026-08-18
 
 The first release intended for real use. The alpha built and ran, but a number
