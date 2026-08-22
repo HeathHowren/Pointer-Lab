@@ -58,6 +58,20 @@ void PointerScanJob::start(PointerScanOptions options) {
     worker_ = std::jthread([this, options] { run(options); });
 }
 
+void PointerScanJob::filter(std::uintptr_t newTarget) {
+    cancel();
+    cancel_ = false;
+    running_ = true;
+    fraction_ = 0.0;
+    {
+        std::scoped_lock lock(mutex_);
+        // Deliberately not cleared: the filter reads the existing chains and
+        // writes back only the survivors.
+        status_ = "Starting rescan";
+    }
+    worker_ = std::jthread([this, newTarget] { runFilter(newTarget); });
+}
+
 void PointerScanJob::cancel() {
     cancel_ = true;
     if (worker_.joinable()) {
@@ -221,6 +235,79 @@ void PointerScanJob::run(PointerScanOptions options) {
     infra::Logger::instance().info("Pointer scan finished: " + std::to_string(chains) + " chain(s) in " +
                                    std::to_string(elapsed) + " ms" + (cancel_ ? " (cancelled)" : "") +
                                    (truncated ? " (truncated)" : ""));
+    running_ = false;
+}
+
+void PointerScanJob::runFilter(std::uintptr_t newTarget) {
+    const auto started = std::chrono::steady_clock::now();
+
+    std::vector<domain::PointerChain> candidates;
+    {
+        std::scoped_lock lock(mutex_);
+        candidates = results_;
+    }
+
+    // Both refusals leave the existing chains exactly as they were. Resolution
+    // fails for every chain when nothing is attached, so running the filter
+    // anyway would quietly discard a scan that took minutes.
+    const char* refusal = nullptr;
+    if (!session_.attached()) {
+        refusal = "A rescan needs an attached process. The chains were left alone.";
+    } else if (candidates.empty()) {
+        refusal = "There are no chains to narrow. Run a pointer scan first.";
+    }
+    if (refusal != nullptr) {
+        {
+            std::scoped_lock lock(mutex_);
+            status_ = refusal;
+        }
+        infra::Logger::instance().warn(refusal);
+        fraction_ = 1.0;
+        running_ = false;
+        return;
+    }
+
+    infra::Logger::instance().info("Pointer rescan: target=" + domain::toHex(newTarget) +
+                                   " chains=" + std::to_string(candidates.size()));
+
+    std::vector<domain::PointerChain> kept;
+    std::size_t examined{};
+    for (const auto& chain : candidates) {
+        if (cancel_) {
+            break;
+        }
+        auto resolved = resolveChain(session_, chain);
+        if (resolved && resolved.value() == newTarget) {
+            kept.push_back(chain);
+        }
+        ++examined;
+        fraction_ = static_cast<double>(examined) / static_cast<double>(candidates.size());
+
+        std::scoped_lock lock(mutex_);
+        status_ = "Rescan: kept " + std::to_string(kept.size()) + " of " + std::to_string(examined) + " checked";
+    }
+
+    const bool cancelled = cancel_;
+    std::size_t remaining{};
+    {
+        std::scoped_lock lock(mutex_);
+        if (cancelled) {
+            remaining = results_.size();
+            status_ = "Rescan cancelled. The chains were left alone.";
+        } else {
+            results_ = std::move(kept);
+            remaining = results_.size();
+            status_ = "Rescan complete: " + std::to_string(remaining) + " of " +
+                      std::to_string(candidates.size()) + " chain(s) still resolve to " + domain::toHex(newTarget);
+        }
+    }
+    fraction_ = 1.0;
+
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+    infra::Logger::instance().info("Pointer rescan finished: " + std::to_string(remaining) + " of " +
+                                   std::to_string(candidates.size()) + " chain(s) kept in " +
+                                   std::to_string(elapsed) + " ms" + (cancelled ? " (cancelled)" : ""));
     running_ = false;
 }
 
