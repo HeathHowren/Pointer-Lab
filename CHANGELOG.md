@@ -63,6 +63,34 @@ All notable changes to Pointer Lab are recorded here. This project follows
   values the previous release used, and one unparseable line does not discard the
   rest of the file.
 
+- **Lua `cancelled()` and `check_cancel()`.** A script can now see that Stop has
+  been pressed, which matters in a loop that spends its time inside Pointer Lab's
+  own functions where the VM hook rarely gets a turn. `check_cancel()` ends the
+  script there and then; like Stop itself, it cannot be caught.
+
+### Changed
+
+- **`loadlibrary()` returns the module's base address** rather than the remote
+  thread's exit code, which was only the low 32 bits of the module handle and so
+  looked like an address on a 64-bit target without being one. The module list is
+  refreshed as part of the call, so a newly loaded DLL is visible to `modules()`
+  immediately. If the module cannot be found afterwards the old exit code is
+  returned rather than reporting a failure that did not happen.
+
+### Fixed
+
+- **A cancelled Lua script can no longer catch its own cancellation.** Stop
+  raised a Lua error, and `pcall` catches errors, so
+  `while true do pcall(f) end` swallowed the cancel and carried on — erroring
+  again every 10 000 instructions and never stopping. A runaway loop is exactly
+  what Stop is for. Scripts now run on a coroutine and cancelling yields instead
+  of raising; a yield passes straight through `pcall` and `xpcall`, and the
+  coroutine is simply never resumed.
+
+- **Stopping a script now stops the scan it started.** The script ended but its
+  scan carried on in the background, so Stop did not stop the work, and the
+  results turned up in the next script that looked.
+
 ## [2.0.0] — 2026-08-18
 
 The first release intended for real use. The alpha built and ran, but a number
