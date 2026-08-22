@@ -1398,27 +1398,60 @@ void UiApp::renderBreakpointPanel() {
     ImGui::SetNextItemWidth(210.0f);
     ImGui::InputTextWithHint("Address", "0x7FF...", breakpointAddress_.data(), breakpointAddress_.size());
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(-120.0f);
+    ImGui::SetNextItemWidth(-60.0f);
     ImGui::InputTextWithHint("Label", "optional name", breakpointLabel_.data(), breakpointLabel_.size());
+
+    static constexpr std::array<domain::BreakpointKind, 4> breakpointKinds{
+        domain::BreakpointKind::Software, domain::BreakpointKind::HardwareExecute,
+        domain::BreakpointKind::HardwareWrite, domain::BreakpointKind::HardwareReadWrite};
+    static constexpr std::array<const char*, 4> breakpointKindLabels{
+        "Software (int3)", "Hardware execute", "Hardware write", "Hardware read/write"};
+    static constexpr std::array<std::uint8_t, 4> breakpointWidths{1, 2, 4, 8};
+
+    ImGui::SetNextItemWidth(210.0f);
+    ImGui::Combo("Kind", &breakpointKindIndex_, breakpointKindLabels.data(),
+                 static_cast<int>(breakpointKindLabels.size()));
+    const auto kind = breakpointKinds[static_cast<std::size_t>(breakpointKindIndex_)];
+    const bool watchesData =
+        kind == domain::BreakpointKind::HardwareWrite || kind == domain::BreakpointKind::HardwareReadWrite;
+    if (watchesData) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(110.0f);
+        ImGui::Combo("Width", &breakpointWidthIndex_, "1 byte\0" "2 bytes\0" "4 bytes\0" "8 bytes\0");
+    }
     ImGui::SameLine();
     if (ImGui::Button("Set breakpoint")) {
         if (auto address = parseAddress(breakpointAddress_.data())) {
-            if (auto result = services_.breakpoints().addBreakpoint(*address, breakpointLabel_.data()); !result) {
+            const auto width = breakpointWidths[static_cast<std::size_t>(breakpointWidthIndex_)];
+            if (auto result = services_.breakpoints().addBreakpoint(*address, breakpointLabel_.data(), kind, width);
+                !result) {
                 notifyError("Breakpoint failed: " + result.error());
             } else {
-                notifyInfo("Breakpoint set at " + domain::toHex(*address) + ".");
+                notifyInfo(std::string(domain::breakpointKindName(kind)) + " breakpoint set at " +
+                           domain::toHex(*address) + ".");
             }
         } else {
             notifyError("Address is not valid hexadecimal.");
         }
     }
+    ImGui::SameLine();
+    helpMarker("A software breakpoint replaces an instruction byte with int3. There can be any number of "
+               "them, but the byte has to be restored and re-armed around every hit, and another thread "
+               "running through the address during that window misses it.\n\n"
+               "A hardware breakpoint uses one of the processor's four debug registers instead. Nothing in "
+               "the target is modified and nothing is ever disarmed, so that window does not exist -- but "
+               "there are exactly four, and the fifth is refused. They are also the only way to break on "
+               "data being read or written rather than on code running.\n\n"
+               "A watched address must be aligned to its width.");
     ImGui::TextDisabled(
-        "The target keeps running: each hit is stepped over and the breakpoint is re-armed behind it.");
+        "The target keeps running: a software hit is stepped over and re-armed behind it, and a hardware "
+        "hit never disarms anything in the first place.");
 
     const auto breakpoints = services_.breakpoints().breakpoints();
-    if (ImGui::BeginTable("breakpoints", 6, denseTableFlags | ImGuiTableFlags_ScrollY, ImVec2(0, 0))) {
+    if (ImGui::BeginTable("breakpoints", 7, denseTableFlags | ImGuiTableFlags_ScrollY, ImVec2(0, 0))) {
         ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 130.0f);
         ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 130.0f);
         ImGui::TableSetupColumn("Armed", ImGuiTableColumnFlags_WidthFixed, 56.0f);
         ImGui::TableSetupColumn("Hits", ImGuiTableColumnFlags_WidthFixed, 70.0f);
         ImGui::TableSetupColumn("Last thread", ImGuiTableColumnFlags_WidthFixed, 88.0f);
@@ -1431,6 +1464,19 @@ void UiApp::renderBreakpointPanel() {
             ImGui::TextUnformatted(domain::toHex(bp.address).c_str());
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(bp.label.c_str());
+            ImGui::TableNextColumn();
+            if (domain::isHardware(bp.kind)) {
+                // Naming the register makes the four-at-a-time limit visible
+                // rather than something the user only meets as a refusal.
+                if (bp.kind == domain::BreakpointKind::HardwareExecute) {
+                    ImGui::Text("%s (DR%d)", domain::breakpointKindName(bp.kind), bp.slot);
+                } else {
+                    ImGui::Text("%s %u (DR%d)", domain::breakpointKindName(bp.kind),
+                                static_cast<unsigned>(bp.length), bp.slot);
+                }
+            } else {
+                ImGui::TextDisabled("%s", domain::breakpointKindName(bp.kind));
+            }
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(bp.enabled ? "yes" : "no");
             ImGui::TableNextColumn();
@@ -1448,10 +1494,13 @@ void UiApp::renderBreakpointPanel() {
                 // is attached to disappears the moment it succeeds.
                 const auto address = bp.address;
                 const auto label = bp.label.empty() ? domain::toHex(address) : bp.label;
-                confirmAction("Remove breakpoint?",
-                              "Remove the breakpoint on " + label +
-                                  "? The original instruction byte is written back to the target.",
-                              "Remove",
+                // A hardware breakpoint never wrote anything into the target, so
+                // promising to write a byte back would be a lie.
+                const std::string consequence =
+                    domain::isHardware(bp.kind)
+                        ? "? Its debug register is released and becomes available again."
+                        : "? The original instruction byte is written back to the target.";
+                confirmAction("Remove breakpoint?", "Remove the breakpoint on " + label + consequence, "Remove",
                               [this, address] {
                                   if (auto removed = services_.breakpoints().removeBreakpoint(address); !removed) {
                                       notifyError(removed.error());

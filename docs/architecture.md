@@ -80,6 +80,21 @@ event first and recognises a trap that was already in flight when the breakpoint
 was removed, because delivering a stale `int3` to a process that no longer has a
 debugger kills it.
 
+Hardware breakpoints share the table and none of that cycle. They live in the
+CPU's four debug registers (`DR0`–`DR3`, controlled by `DR7`), so nothing in the
+target is modified and nothing is ever disarmed — the window in which a software
+breakpoint can be missed does not exist for them. The registers are per-thread,
+so the pump programs every thread the target has and every thread it later
+creates, always writing them wholesale from the breakpoint table rather than
+patching bits, so a thread created mid-add cannot disagree about `DR7`. A hit
+arrives as `EXCEPTION_SINGLE_STEP` with `DR6` naming the register; an execute
+breakpoint faults *before* its instruction, so `EFLAGS.RF` is set on resume or
+the thread would fault on it forever. The stale-trap problem has a hardware twin:
+a trap already in flight when its register is cleared arrives with `DR6` wiped
+and nothing to match it against, so once debug registers have been used in an
+attach, an unclaimed single-step exception is treated as ours. Passing it on
+would be a certain kill; swallowing somebody else's costs nothing.
+
 ### `engine_*/` — one job each
 
 Each engine takes a `TargetSession&` and does one thing. The long-running ones
