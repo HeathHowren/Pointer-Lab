@@ -251,7 +251,19 @@ LRESULT UiApp::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         break;
+    case WM_HOTKEY: {
+        // The point of the whole feature: this arrives while the *target* is in
+        // the foreground, which is when a freeze toggle is actually wanted.
+        const int id = static_cast<int>(wParam);
+        if (id >= platform_win32::GlobalHotkeys::firstId && id <= platform_win32::GlobalHotkeys::lastId) {
+            services_.addressList().toggleHotkey("F" + std::to_string(id));
+        }
+        return 0;
+    }
     case WM_DESTROY:
+        // Before the window goes away: an unregistered hotkey needs the handle
+        // it was registered against.
+        hotkeys_.unregisterAll();
         PostQuitMessage(0);
         return 0;
     default:
@@ -392,6 +404,7 @@ void UiApp::render() {
         luaOutput_.push_back(std::move(line));
     }
 
+    syncGlobalHotkeys();
     handleHotkeys();
     renderMenu();
     renderCommandBar();
@@ -2404,8 +2417,11 @@ void UiApp::renderHelpWindow() {
         ImGui::SeparatorText("Keyboard");
         ImGui::BulletText("F1 - F12   Toggle freeze on the address list entry with that hotkey.");
         ImGui::TextDisabled(
-            "Hotkeys are handled while Pointer Lab has focus. They do not fire while the target "
-            "window is in the foreground.");
+            "Hotkeys are registered with Windows, so they fire while the target window is in the "
+            "foreground - which is when you actually want them. Only keys assigned to an entry are "
+            "registered, so Pointer Lab does not take F1-F12 away from everything else on the machine. "
+            "A key another application already owns cannot be registered, and falls back to working "
+            "only while Pointer Lab has focus.");
 
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         ImGui::SeparatorText("Files");
@@ -2417,12 +2433,40 @@ void UiApp::renderHelpWindow() {
     ImGui::End();
 }
 
+void UiApp::syncGlobalHotkeys() {
+    std::set<int> wanted;
+    for (const auto& entry : services_.session().addressList().snapshot()) {
+        if (auto id = platform_win32::GlobalHotkeys::idFor(entry.hotkey)) {
+            wanted.insert(*id);
+        }
+    }
+    if (wanted == hotkeysRequested_) {
+        return;
+    }
+    hotkeysRequested_ = wanted;
+
+    const auto refused = hotkeys_.apply(hwnd_, wanted);
+    for (const int id : refused) {
+        // Another application already owns it. The in-window handler still
+        // serves this key, so say what was lost rather than letting the user
+        // wonder why one of their hotkeys behaves differently.
+        notifyError("F" + std::to_string(id) +
+                    " is already registered by another application, so it only works while Pointer Lab has focus.");
+    }
+}
+
 void UiApp::handleHotkeys() {
     if (ImGui::GetIO().WantTextInput) {
         return;
     }
     const ImGuiKey keys[] = {ImGuiKey_F1, ImGuiKey_F2, ImGuiKey_F3, ImGuiKey_F4, ImGuiKey_F5, ImGuiKey_F6, ImGuiKey_F7, ImGuiKey_F8, ImGuiKey_F9, ImGuiKey_F10, ImGuiKey_F11, ImGuiKey_F12};
     for (int i = 0; i < IM_ARRAYSIZE(keys); ++i) {
+        // A globally registered key arrives as WM_HOTKEY whatever has focus,
+        // including when that focus is Pointer Lab. Handling it here as well
+        // would toggle the entry twice and leave it exactly as it was.
+        if (hotkeys_.owns(i + 1)) {
+            continue;
+        }
         if (ImGui::IsKeyPressed(keys[i], false)) {
             services_.addressList().toggleHotkey("F" + std::to_string(i + 1));
         }

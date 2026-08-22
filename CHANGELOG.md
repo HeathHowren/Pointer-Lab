@@ -35,6 +35,18 @@ All notable changes to Pointer Lab are recorded here. This project follows
   one, and the breakpoint table names the register each one holds. Software
   breakpoints are unchanged and remain the default.
 
+- **Global hotkeys.** F1–F12 freeze toggles are now registered with Windows
+  instead of being read from Pointer Lab's own message queue, so they fire while
+  the target window is in the foreground. That is the only time they were ever
+  wanted: the previous in-window handling stopped working the moment you clicked
+  into the target.
+
+  Only keys actually assigned to an address list entry are registered, so
+  Pointer Lab does not take F1–F12 away from every other application for as long
+  as it is open. A key another application already owns cannot be registered; it
+  is reported and falls back to the old in-window behaviour rather than silently
+  doing nothing.
+
 ## [2.0.0] — 2026-08-18
 
 The first release intended for real use. The alpha built and ran, but a number

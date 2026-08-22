@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <functional>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -60,6 +61,9 @@ private:
     void renderAboutWindow();
     void renderHelpWindow();
     void handleHotkeys();
+    // Registers exactly the F-keys currently assigned to an address list entry,
+    // so Pointer Lab claims no key it is not actually using.
+    void syncGlobalHotkeys();
 
     // Failures used to reach the user only through the Logs panel, which is
     // hidden by default, so a failed patch looked exactly like a successful
@@ -101,6 +105,10 @@ private:
     bool minimized_{};
 
     services::RuntimeServices services_;
+    platform_win32::GlobalHotkeys hotkeys_;
+    // What syncGlobalHotkeys last asked for. Compared against rather than the
+    // registered set, so a key the OS refuses is not retried every frame.
+    std::set<int> hotkeysRequested_;
     scripting::LuaConsole lua_;
     storage::ProjectStore projectStore_;
     std::filesystem::path projectPath_;

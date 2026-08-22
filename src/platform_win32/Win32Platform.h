@@ -11,6 +11,7 @@
 #include <future>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -75,6 +76,45 @@ public:
     static bool isExecutableProtect(DWORD protect);
     static std::string formatLastError(DWORD error = GetLastError());
     static std::string protectToString(DWORD protect);
+};
+
+// F1-F12 registered with the OS rather than read from the message queue.
+//
+// An in-window hotkey is nearly useless for a memory tool: the moment you click
+// into the target to make something happen, Pointer Lab no longer has focus and
+// the key stops working. A registered hotkey fires wherever the user is.
+//
+// Only the keys actually assigned to an address list entry are registered.
+// Claiming all twelve would take F1-F12 away from every other application on the
+// machine for as long as Pointer Lab is open, which is not ours to do.
+class GlobalHotkeys {
+public:
+    GlobalHotkeys() = default;
+    ~GlobalHotkeys();
+
+    GlobalHotkeys(const GlobalHotkeys&) = delete;
+    GlobalHotkeys& operator=(const GlobalHotkeys&) = delete;
+
+    // Replaces whatever was registered before with exactly `wanted`. Returns the
+    // ids the OS refused -- normally because another application already owns
+    // that key -- so the caller can fall back to in-window handling for them
+    // rather than silently dropping the key.
+    std::vector<int> apply(HWND window, const std::set<int>& wanted);
+    void unregisterAll();
+
+    // Whether this key is currently served by the OS. A key that is arrives as
+    // WM_HOTKEY whatever has focus, so handling it in-window as well would
+    // toggle the entry twice.
+    [[nodiscard]] bool owns(int id) const { return registered_.count(id) != 0; }
+
+    // "F7" -> 7. Only F1-F12 are recognised.
+    [[nodiscard]] static std::optional<int> idFor(const std::string& name);
+    static constexpr int firstId = 1;
+    static constexpr int lastId = 12;
+
+private:
+    HWND window_{};
+    std::set<int> registered_;
 };
 
 // Software and hardware breakpoints, done properly.
