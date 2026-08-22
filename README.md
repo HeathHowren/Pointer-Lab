@@ -50,8 +50,10 @@ silently.
   configurable epsilon, because bit-exact float comparison finds nothing in
   practice. The result limit is configurable and truncation is reported rather
   than hidden.
-- **Address list** — groups, descriptions, value freeze, manual add and edit,
-  F1–F12 in-window hotkey toggles.
+- **Address list** — groups, descriptions, value freeze, manual add and edit, and
+  F1–F12 freeze toggles registered with Windows, so they fire while the *target*
+  is in the foreground. Only keys actually assigned to an entry are registered,
+  so Pointer Lab does not take F1–F12 away from the rest of the machine.
 - **Pointer scanner** — multi-level pointer chain search with a rescan pass.
   Chains are stored as `module+offset` plus offsets, so a chain found in one run
   still resolves after the target restarts and ASLR moves everything. Restart the
