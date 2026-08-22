@@ -47,6 +47,22 @@ All notable changes to Pointer Lab are recorded here. This project follows
   is reported and falls back to the old in-window behaviour rather than silently
   doing nothing.
 
+- **Settings persistence.** Scan options (result limit, float tolerance, the
+  writable and executable filters), the selected value types, the pointer scan
+  depth and which panels are open now survive a restart. ImGui's own `.ini`
+  already remembered where a panel sat and what it was docked to, but whether it
+  was open at all is the application's state, so a panel you closed came back on
+  every launch.
+
+  These live in a plain `settings.ini` next to the log, not in `.iretable`: they
+  belong to the installation rather than to a project, and a result limit has no
+  business travelling with a project file to somebody else's machine. **The
+  project format is unchanged and still version 3.**
+
+  A missing, malformed or newer-than-expected settings file falls back to the
+  values the previous release used, and one unparseable line does not discard the
+  rest of the file.
+
 ## [2.0.0] — 2026-08-18
 
 The first release intended for real use. The alpha built and ran, but a number

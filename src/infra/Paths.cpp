@@ -25,6 +25,10 @@ std::filesystem::path Paths::sessionFile() {
     return appData() / "session.iretable";
 }
 
+std::filesystem::path Paths::settingsFile() {
+    return appData() / "settings.ini";
+}
+
 std::filesystem::path Paths::crashFile() {
     return appData() / "crash.log";
 }

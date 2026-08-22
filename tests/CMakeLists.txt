@@ -28,6 +28,7 @@ add_executable(pointerlab_tests
     test_project_store.cpp
     test_scanner.cpp
     test_scan_integration.cpp
+    test_settings.cpp
     test_asm_disasm.cpp
     test_breakpoints.cpp
     test_hotkeys.cpp
