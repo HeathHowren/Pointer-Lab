@@ -3,6 +3,7 @@
 #include "infra/CrashHandler.h"
 #include "infra/Logger.h"
 #include "infra/Paths.h"
+#include "infra/Settings.h"
 #include "platform_win32/Win32Platform.h"
 #include "ui/EmbeddedFonts.h"
 
@@ -183,6 +184,7 @@ int UiApp::run() {
     ImGui_ImplDX11_Init(device_, deviceContext_);
 
     refreshProcesses();
+    loadSettings();
     loadSession();
 
     ShowWindow(hwnd_, showCommand_);
@@ -212,6 +214,7 @@ int UiApp::run() {
     // Autosave so the address list survives a normal exit even when the user
     // never explicitly saved a project.
     saveSession();
+    saveSettings();
     return 0;
 }
 
@@ -2184,6 +2187,71 @@ void UiApp::saveSession() {
     saveProjectTo(infra::Paths::sessionFile(), true);
 }
 
+void UiApp::loadSettings() {
+    const auto settings = infra::loadSettings(infra::Paths::settingsFile());
+
+    scanMaxResults_ = static_cast<int>(
+        std::clamp<std::uint64_t>(settings.scanMaxResults, 1000, 20000000));
+    scanFloatEpsilon_ = std::clamp(static_cast<float>(settings.scanFloatEpsilon), 0.0f, 1000.0f);
+    scanWritableOnly_ = settings.scanWritableOnly;
+    scanExecutableOnly_ = settings.scanExecutableOnly;
+
+    // A stored index is clamped rather than trusted: the list of value types can
+    // grow between releases, and an out-of-range index would read off the end.
+    const auto typeCount = static_cast<int>(domain::valueTypes().size()) - 1;
+    scanTypeIndex_ = std::clamp(settings.scanTypeIndex, 0, typeCount);
+    pointerTypeIndex_ = std::clamp(settings.pointerTypeIndex, 0, typeCount);
+    pointerDepth_ = std::clamp(settings.pointerDepth, 1, 8);
+
+    showMemoryViewer_ = settings.showMemoryViewer;
+    showDisassembly_ = settings.showDisassembly;
+    showBreakpoints_ = settings.showBreakpoints;
+    showModules_ = settings.showModules;
+    showMemoryRegions_ = settings.showMemoryRegions;
+    showLogs_ = settings.showLogs;
+    showPointerScanner_ = settings.showPointerScanner;
+    showLuaScanner_ = settings.showLuaScanner;
+    showInjection_ = settings.showInjection;
+    showLuaConsole_ = settings.showLuaConsole;
+
+    // The scan job holds its own copy, so restoring the fields alone would leave
+    // the first scan of the session running with default options.
+    engine_scan::ScanOptions options;
+    options.writableOnly = scanWritableOnly_;
+    options.executableOnly = scanExecutableOnly_;
+    options.maxResults = static_cast<std::size_t>(scanMaxResults_);
+    options.floatEpsilon = static_cast<double>(scanFloatEpsilon_);
+    services_.scanJob().setOptions(options);
+}
+
+void UiApp::saveSettings() {
+    infra::Settings settings;
+    settings.scanMaxResults = static_cast<std::uint64_t>(scanMaxResults_);
+    settings.scanFloatEpsilon = static_cast<double>(scanFloatEpsilon_);
+    settings.scanWritableOnly = scanWritableOnly_;
+    settings.scanExecutableOnly = scanExecutableOnly_;
+    settings.scanTypeIndex = scanTypeIndex_;
+    settings.pointerDepth = pointerDepth_;
+    settings.pointerTypeIndex = pointerTypeIndex_;
+    settings.showMemoryViewer = showMemoryViewer_;
+    settings.showDisassembly = showDisassembly_;
+    settings.showBreakpoints = showBreakpoints_;
+    settings.showModules = showModules_;
+    settings.showMemoryRegions = showMemoryRegions_;
+    settings.showLogs = showLogs_;
+    settings.showPointerScanner = showPointerScanner_;
+    settings.showLuaScanner = showLuaScanner_;
+    settings.showInjection = showInjection_;
+    settings.showLuaConsole = showLuaConsole_;
+
+    if (!infra::saveSettings(infra::Paths::settingsFile(), settings)) {
+        // Nothing is visible by now -- the window is gone -- so the log is the
+        // only place this can be said, but it must still be said somewhere.
+        infra::Logger::instance().error("Could not write " + infra::Paths::settingsFile().string() +
+                                        "; preferences from this session were not saved.");
+    }
+}
+
 void UiApp::requestDetach() {
     const auto liveBreakpoints = services_.breakpoints().breakpoints().size();
     auto detach = [this] {
@@ -2426,7 +2494,8 @@ void UiApp::renderHelpWindow() {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         ImGui::SeparatorText("Files");
         ImGui::BulletText("Projects are saved as .iretable files (File menu).");
-        ImGui::BulletText("Logs, layout, session and crash dumps live in %%LOCALAPPDATA%%\\PointerLab.");
+        ImGui::BulletText("Logs, layout, session, settings and crash dumps live in %%LOCALAPPDATA%%\\PointerLab.");
+        ImGui::BulletText("Scan options and which panels are open are remembered between runs.");
 
         ImGui::PopTextWrapPos();
     }
