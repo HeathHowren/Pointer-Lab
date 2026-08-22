@@ -3,6 +3,25 @@
 All notable changes to Pointer Lab are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Pointer scan rescan pass.** The pointer scanner can now narrow the chains it
+  already found instead of only starting over. Restart the target, find the
+  value's new address, put it in Target address and press Rescan: every chain is
+  re-resolved and only the ones that still land on the value are kept. A first
+  scan returns thousands of chains that pointed the right way once; this is what
+  reduces them to the handful that actually track the value. It costs a few reads
+  per chain rather than another sweep of the address space, so it takes seconds
+  where the first scan took minutes.
+
+  A rescan refuses, and leaves the chains untouched, when nothing is attached or
+  there is nothing to narrow — resolution fails for every chain with no process
+  attached, so running it anyway would silently discard a scan that took minutes.
+  Cancelling a rescan also leaves the chains untouched, because a half-applied
+  filter is not a result set.
+
 ## [2.0.0] — 2026-08-18
 
 The first release intended for real use. The alpha built and ran, but a number

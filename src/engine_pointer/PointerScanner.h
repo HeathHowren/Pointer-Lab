@@ -37,12 +37,24 @@ public:
     PointerScanJob& operator=(const PointerScanJob&) = delete;
 
     void start(PointerScanOptions options);
+    // Narrows the chains already found to the ones that still resolve to
+    // newTarget. A first scan returns thousands of chains that happened to point
+    // the right way once; the ones that survive being checked again -- normally
+    // after the target has restarted and moved the value -- are the ones that
+    // actually track it. This costs a few reads per chain rather than another
+    // sweep of the address space, so it is the cheap half of the workflow.
+    //
+    // Refuses, leaving the chains untouched, when nothing is attached or there
+    // is nothing to narrow. A cancelled filter also leaves them untouched: a
+    // half-applied filter is not a result set.
+    void filter(std::uintptr_t newTarget);
     void cancel();
     [[nodiscard]] PointerScanProgress progress() const;
     [[nodiscard]] std::vector<domain::PointerChain> results() const;
 
 private:
     void run(PointerScanOptions options);
+    void runFilter(std::uintptr_t newTarget);
 
     domain::TargetSession& session_;
     mutable std::mutex mutex_;
