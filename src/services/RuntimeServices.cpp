@@ -202,15 +202,17 @@ void BreakpointService::detachDebugger() {
     debugPump_.detach();
 }
 
-infra::Result<void> BreakpointService::addBreakpoint(std::uintptr_t address, std::string label) {
+infra::Result<void> BreakpointService::addBreakpoint(std::uintptr_t address, std::string label,
+                                                     domain::BreakpointKind kind, std::uint8_t length) {
     auto attach = attachDebugger();
     if (!attach) {
         return attach;
     }
 
-    auto added = debugPump_.addBreakpoint(address, std::move(label));
+    auto added = debugPump_.addBreakpoint(address, std::move(label), kind, length);
     if (added) {
-        infra::Logger::instance().info("Breakpoint set at " + domain::toHex(address) + ".");
+        infra::Logger::instance().info(std::string(domain::breakpointKindName(kind)) + " breakpoint set at " +
+                                       domain::toHex(address) + ".");
     }
     return added;
 }

@@ -77,7 +77,7 @@ public:
     static std::string protectToString(DWORD protect);
 };
 
-// Software breakpoints, done properly.
+// Software and hardware breakpoints, done properly.
 //
 // Two things about this were badly wrong before. DebugActiveProcess ran on the
 // UI thread while WaitForDebugEvent ran on another, and Windows requires both
@@ -88,6 +88,10 @@ public:
 // The pump therefore owns the whole lifecycle: it attaches, pumps and detaches
 // on its own thread, and it owns the breakpoint table because arming has to be
 // interleaved with the single-step dance that follows every hit.
+//
+// Hardware breakpoints share the table but none of that dance. They live in the
+// CPU's four debug registers, which are per-thread, so the pump programs every
+// thread the target has and every thread it goes on to create.
 class DebugEventPump {
 public:
     using HitCallback = std::function<void(const domain::BreakpointInfo&)>;
@@ -103,7 +107,14 @@ public:
     void detach();
     [[nodiscard]] bool attached() const { return attached_; }
 
-    infra::Result<void> addBreakpoint(std::uintptr_t address, std::string label);
+    // A hardware breakpoint occupies one of the four debug registers and fails
+    // with an explicit message once all four are taken -- that is a limit of the
+    // CPU, not of Pointer Lab, so it is reported rather than worked around.
+    // length is the number of bytes a data breakpoint watches (1, 2, 4 or 8) and
+    // is ignored by the other kinds.
+    infra::Result<void> addBreakpoint(std::uintptr_t address, std::string label,
+                                      domain::BreakpointKind kind = domain::BreakpointKind::Software,
+                                      std::uint8_t length = 1);
     infra::Result<void> removeBreakpoint(std::uintptr_t address);
     [[nodiscard]] std::vector<domain::BreakpointInfo> breakpoints() const;
 
@@ -112,9 +123,35 @@ private:
     void loop();
     bool handleBreakpoint(std::uintptr_t address, std::uint32_t threadId);
     bool handleSingleStep(std::uint32_t threadId);
+
+    // What the debug registers say about a single-step exception.
+    enum class HardwareVerdict {
+        NotOurs, // No debug register fired; this is somebody else's exception.
+        Stale,   // Ours, but its breakpoint is gone. Swallow without reporting.
+        Hit      // A live hardware breakpoint fired.
+    };
+
+    // The two things a single-step exception can mean. Both expect mutex_ to be
+    // held. handleSoftwareStep returns whether the exception was ours.
+    HardwareVerdict handleHardwareHit(std::uint32_t threadId, domain::BreakpointInfo& snapshot);
+    bool handleSoftwareStep(std::map<std::uint32_t, std::uintptr_t>::iterator stepping);
     bool rewindThread(std::uintptr_t address, std::uint32_t threadId) const;
     void disarmAll();
     void drainPendingEvents();
+
+    // Debug-register plumbing. All four expect mutex_ to be held: breakpoints_
+    // is the authority for what the registers should contain, and a thread that
+    // reads it while an add is half-applied programs the wrong thing.
+    //
+    // The registers are always written wholesale from the table rather than
+    // patched a bit at a time, so a thread created during an add cannot end up
+    // disagreeing with the others about DR7.
+    infra::Result<void> addHardwareBreakpoint(std::uintptr_t address, std::string label, domain::BreakpointKind kind,
+                                              std::uint8_t length);
+    [[nodiscard]] bool anyHardwareArmed() const;
+    [[nodiscard]] int freeDebugSlot() const;
+    bool writeDebugRegisters(HANDLE thread) const;
+    void applyDebugRegistersToAllThreads() const;
 
     [[nodiscard]] infra::Result<std::uint8_t> readByte(std::uintptr_t address) const;
     infra::Result<void> writeByte(std::uintptr_t address, std::uint8_t value) const;
@@ -140,6 +177,12 @@ private:
     // is restored, and its exception arrives afterwards; treating that as
     // somebody else's breakpoint passes it through and kills the target.
     std::set<std::uintptr_t> disarmed_;
+    // Whether any hardware breakpoint has been set during this attach. The
+    // hardware equivalent of disarmed_: a debug-register trap already in flight
+    // when its register was cleared arrives with DR6 wiped and nothing left to
+    // match it against, so after hardware has been used once an unclaimed
+    // single-step exception has to be treated as ours.
+    bool hardwareUsed_{};
 };
 
 } // namespace ire::platform_win32

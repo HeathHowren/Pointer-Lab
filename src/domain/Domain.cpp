@@ -84,6 +84,24 @@ const char* scanModeName(ScanMode mode) {
     return "Unknown";
 }
 
+bool isHardware(BreakpointKind kind) {
+    return kind != BreakpointKind::Software;
+}
+
+const char* breakpointKindName(BreakpointKind kind) {
+    switch (kind) {
+    case BreakpointKind::Software: return "Software";
+    case BreakpointKind::HardwareExecute: return "Execute";
+    case BreakpointKind::HardwareWrite: return "Write";
+    case BreakpointKind::HardwareReadWrite: return "Read/write";
+    }
+    return "Unknown";
+}
+
+bool isValidWatchLength(std::uint8_t length) {
+    return length == 1 || length == 2 || length == 4 || length == 8;
+}
+
 std::optional<ValueType> parseValueType(const std::string& text) {
     const auto value = lower(text);
     for (const auto type : valueTypes()) {

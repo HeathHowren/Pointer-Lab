@@ -141,14 +141,45 @@ struct RegisterContext {
     bool captured{};
 };
 
+// How a breakpoint is implemented inside the target.
+//
+// A software breakpoint replaces an instruction byte with int3. There can be any
+// number of them, but the original byte has to be put back and re-armed around
+// every hit, and another thread running through the address during that window
+// misses it.
+//
+// A hardware breakpoint uses one of the CPU's four debug registers instead.
+// Nothing in the target is modified and nothing is ever disarmed, so the window
+// does not exist -- at the cost of there being exactly four. They are also the
+// only way to break on data being read or written rather than on execution.
+enum class BreakpointKind {
+    Software,
+    HardwareExecute,
+    HardwareWrite,
+    HardwareReadWrite
+};
+
+[[nodiscard]] bool isHardware(BreakpointKind kind);
+[[nodiscard]] const char* breakpointKindName(BreakpointKind kind);
+// A debug register watches 1, 2, 4 or 8 bytes, and the address it watches must
+// be aligned to that width.
+[[nodiscard]] bool isValidWatchLength(std::uint8_t length);
+
 struct BreakpointInfo {
     std::uintptr_t address{};
+    // Only meaningful for a software breakpoint; a hardware one never modifies
+    // the target.
     std::uint8_t originalByte{};
     std::uint64_t hitCount{};
     bool enabled{};
     std::string label;
     // State of the thread that most recently hit this breakpoint.
     RegisterContext lastHit;
+    BreakpointKind kind{BreakpointKind::Software};
+    // Bytes watched by a hardware data breakpoint. Always 1 for the rest.
+    std::uint8_t length{1};
+    // Debug register this breakpoint occupies, 0-3, or -1 when it is software.
+    int slot{-1};
 };
 
 struct Instruction {
