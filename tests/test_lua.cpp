@@ -178,24 +178,34 @@ TEST_CASE("Cancelling a script also cancels the scan it started", "[lua][cancel]
     REQUIRE(helper.ready());
 
     Console fixture;
+    // The script parks in a loop of its own rather than in scan_wait. An
+    // unknown-value scan of the helper takes a few milliseconds in a Release
+    // build, so a script that scanned, waited and printed had already run to
+    // completion before a fixed sleep expired: the cancel then arrived with
+    // nothing left to cancel, and the test said so only in Release.
     const auto script = "attach(" + std::to_string(helper.pid()) +
                         ")\n"
                         "scan_unknown('i32')\n"
-                        "scan_wait()\n"
-                        "print('finished')\n";
+                        "while true do end\n";
     REQUIRE(fixture.console.submit(script));
 
-    // Let the scan get going before pulling the rug out.
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    // Wait for the scan to actually be in flight instead of assuming it is.
+    const auto inFlight = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (!fixture.services.scanJob().progress().running && std::chrono::steady_clock::now() < inFlight) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(fixture.services.scanJob().progress().running);
+    REQUIRE(fixture.console.running());
+
+    // The loop has no exit, so only the cancel can end the script.
     REQUIRE(cancelAndWait(fixture.console, std::chrono::seconds(20)));
 
-    // The scan is stopped too, not merely orphaned.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
-    while (fixture.services.scanJob().progress().running && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    CHECK_FALSE(fixture.services.scanJob().progress().running);
-    CHECK_FALSE(anyContains(fixture.console.takeOutput(), "finished"));
+    // Stopped, not merely orphaned. ScanJob::cancel joins its worker, so the
+    // scan is already over by the time cancel returns either way -- the status
+    // is what says which of the two ways it ended.
+    const auto progress = fixture.services.scanJob().progress();
+    CHECK_FALSE(progress.running);
+    CHECK(progress.status.find("cancelled") != std::string::npos);
 }
 
 // loadlibrary used to return the remote thread's exit code, which is only the
