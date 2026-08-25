@@ -109,6 +109,10 @@ TEST_CASE("An access violation produces a minidump and a crash log entry", "[cra
 
     REQUIRE(std::filesystem::exists(scratch.log()));
     const auto log = readAll(scratch.log());
+    // Printed when one of these fails: a log that could not be read and a
+    // log missing a line otherwise both arrive as "npos != npos".
+    INFO("crash log: " << log);
+    REQUIRE_FALSE(log.empty());
     CHECK(log.find("crash: code 0xC0000005") != std::string::npos);
     CHECK(log.find("minidump written") != std::string::npos);
 }
@@ -129,7 +133,12 @@ TEST_CASE("An uncaught C++ exception produces a minidump", "[crash]") {
     // one line both used to surface as "npos != npos", which says nothing about
     // which of the two happened.
     REQUIRE(std::filesystem::exists(scratch.log()));
-    CHECK(readAll(scratch.log()).find("minidump written") != std::string::npos);
+    const auto log = readAll(scratch.log());
+    // Printed when one of these fails: a log that could not be read and a
+    // log missing a line otherwise both arrive as "npos != npos".
+    INFO("crash log: " << log);
+    REQUIRE_FALSE(log.empty());
+    CHECK(log.find("minidump written") != std::string::npos);
 }
 
 TEST_CASE("An invalid CRT parameter produces a minidump", "[crash]") {
@@ -141,7 +150,12 @@ TEST_CASE("An invalid CRT parameter produces a minidump", "[crash]") {
 
     REQUIRE(std::filesystem::exists(scratch.dump()));
     REQUIRE(std::filesystem::exists(scratch.log()));
-    CHECK(readAll(scratch.log()).find("minidump written") != std::string::npos);
+    const auto log = readAll(scratch.log());
+    // Printed when one of these fails: a log that could not be read and a
+    // log missing a line otherwise both arrive as "npos != npos".
+    INFO("crash log: " << log);
+    REQUIRE_FALSE(log.empty());
+    CHECK(log.find("minidump written") != std::string::npos);
 }
 
 TEST_CASE("The crash paths all live in one folder", "[crash]") {

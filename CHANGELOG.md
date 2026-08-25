@@ -99,6 +99,15 @@ rather than in the project format.
   scan carried on in the background, so Stop did not stop the work, and the
   results turned up in the next script that looked.
 
+- **A crash dump is no longer lost to a failed memory walk.** The dump asks
+  for the memory the stack points at, and that walk can report failure after
+  most of the file has already been written -- most often when an uncaught
+  throw brings the process down, where an exception is still in flight while
+  the walk runs. The crash then left behind a large `.dmp` and a log line
+  saying no dump had been written, which is the one moment the log has to be
+  believable. A rich dump that fails is now started again as a plain one,
+  which needs no walk: much less than the full dump, much more than nothing.
+
 ### Internal
 
 - **`UiApp.cpp` is split into nine files grouped by area.** It was a single
