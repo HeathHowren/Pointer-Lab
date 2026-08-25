@@ -121,8 +121,27 @@ flood the interface. The hit count is not rate limited.
 
 ### `ui/UiApp` — Dear ImGui over DX11
 
-One class, one file, panel-per-method. It owns the Win32 window, the D3D11
-device and the ImGui context, and holds `RuntimeServices` by reference.
+One class, panel-per-method, across several translation units grouped by area. It
+owns the Win32 window, the D3D11 device and the ImGui context, and holds
+`RuntimeServices` by reference.
+
+| File | Holds |
+| --- | --- |
+| `UiApp.cpp` | Window and device lifecycle, `render()`, toasts, confirmations, hotkeys |
+| `UiLayout.cpp` | Visual style and the default docking layout |
+| `UiMenu.cpp` | Menu bar and command bar |
+| `UiPanelsTarget.cpp` | Process, modules, memory regions |
+| `UiPanelsScan.cpp` | Scanner and address list |
+| `UiPanelsMemory.cpp` | Hex viewer, disassembly, breakpoints |
+| `UiPanelsTools.cpp` | Pointer scanner, injection, Lua scanner and console, log |
+| `UiProject.cpp` | Project files, session autosave, settings |
+| `UiWindows.cpp` | About and Help |
+
+`UiInternal.h` carries the small helpers the panels share — `denseTableFlags`,
+`helpMarker`, `statusPill`, `valueTypeNames` and the like — which used to sit in
+an anonymous namespace at the top of the single file. They are `inline` in a
+named namespace rather than in an anonymous one, so a file that does not happen
+to use one does not trip `/W4 /WX` over an unused static function.
 
 Two conventions matter here:
 
