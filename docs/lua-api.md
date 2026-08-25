@@ -5,9 +5,9 @@ globals. Everything here is implemented in
 [`src/scripting/LuaConsole.cpp`](../src/scripting/LuaConsole.cpp).
 
 There is **one Lua state for the whole session**, so a global you set in one run
-is still there on the next. Scripts run on a worker thread, one at a time; a
-second submission while one is running is refused with "A script is already
-running."
+is still there on the next. Scripts run on a worker thread, one at a time, each
+on its own coroutine; a second submission while one is running is refused with
+"A script is already running."
 
 The Lua *Scanner* panel is a separate feature with its own `function(ctx)`
 predicate API. None of the functions below relate to it.
@@ -181,7 +181,8 @@ the result limit allowed.
 Polls every 10 ms until the scan is idle. Returns `true` — immediately, if no
 scan was ever started — or `false, "Timed out waiting for the scan."`
 
-Raises `"Script cancelled."` if the script is cancelled while waiting.
+Ends the script if it is cancelled while waiting. That cannot be caught with
+`pcall` — see [Cancellation](#cancellation).
 
 ### `scan_results(limit = 1000)` → table, integer
 
@@ -259,12 +260,16 @@ rather than reporting a bogus exit code. The thread keeps running.
 ### `loadlibrary(path)` → boolean, integer | string
 
 Loads a DLL into the target via a remote `LoadLibraryW`. Returns
-`true, exit_code` or `false, message`.
+`true, base` or `false, message`.
 
-The integer is the remote thread's exit code, which for `LoadLibraryW` is the
-**low 32 bits** of the returned module handle. Non-zero means the DLL loaded,
-but it is a truncated handle, not a usable 64-bit module base — call `modules()`
-if you need the real base.
+The integer is the module's **base address**, looked up by filename after the
+load. The module list is refreshed as part of this, so the newly loaded DLL is
+also visible to `modules()` immediately afterwards.
+
+If the load succeeds but the module cannot then be found in the list, the remote
+thread's exit code is returned instead — the low 32 bits of the module handle,
+which is not a usable address. Compare against `modules()` if you need to be
+certain.
 
 Fails with an explicit message on a 32-bit (WOW64) target.
 
@@ -287,22 +292,41 @@ not read.
 
 ## Cancellation
 
-Stop sets a flag that two things watch: a VM hook that fires every 10 000
-instructions, and `scan_wait`'s 10 ms poll. Either raises the Lua error
-`"Script cancelled."`
+Your script runs on its own coroutine. Stop sets a flag that three things watch:
+a VM hook that fires every 10 000 instructions, `scan_wait`'s 10 ms poll, and
+`check_cancel`. Any of them **yields**, which ends the script — Pointer Lab
+simply never resumes the coroutine, and prints `Script cancelled.`
 
-Consequences worth knowing:
+**A cancel cannot be caught.** `pcall` and `xpcall` catch errors; a yield passes
+straight through them. `while true do pcall(f) end` stops when you press Stop.
 
-- **`pcall` swallows it.** The flag is not cleared until the next submission, so
-  a caught cancel just means the hook raises again 10 000 instructions later. A
-  loop that catches and continues will keep erroring rather than stopping.
+Stop also cancels a scan the script started, so the work stops with the script
+rather than continuing in the background.
+
+Still worth knowing:
+
 - **Time inside a C function is not interruptible.** A long `read_bytes`, or the
-  join at the start of a scan, runs to completion. Only Lua instructions and
-  `scan_wait` observe the flag.
-- **Cancelling the script does not cancel a running scan.** `scan_wait` aborts,
-  but the scan continues in the background and its results are available to the
-  next script.
-- There is no Lua-callable way to cancel, and no way to read the flag.
+  join at the start of a scan, runs to completion. Only Lua instructions,
+  `scan_wait` and `check_cancel` observe the flag.
+- The Lua state is shared between runs, so globals set by a cancelled script are
+  still there on the next one.
+
+### `cancelled()` → boolean
+
+Whether Stop has been pressed. Useful inside a loop that spends its time in C
+functions, where the VM hook rarely gets a turn:
+
+```lua
+for i = 1, 100000 do
+    if cancelled() then print("stopping early") break end
+    read_bytes(base + i * 16, 16)
+end
+```
+
+### `check_cancel()`
+
+Ends the script immediately if Stop has been pressed, and does nothing
+otherwise. Like the hook, this cannot be caught with `pcall`.
 
 ## Example
 
