@@ -146,6 +146,7 @@ add_library(pointerlab_core STATIC
     src/infra/CrashHandler.cpp
     src/infra/Logger.cpp
     src/infra/Paths.cpp
+    src/infra/Settings.cpp
     src/platform_win32/Win32Platform.cpp
     src/scripting/LuaConsole.cpp
     src/scripting/LuaScanner.cpp

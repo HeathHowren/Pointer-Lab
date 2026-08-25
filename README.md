@@ -82,7 +82,9 @@ silently.
   [docs/lua-api.md](docs/lua-api.md).
 - **Persistence** — `.iretable` project format with File → New/Open/Save/Save As,
   plus autosave on exit and autoload on start. Format documented in
-  [docs/iretable-format.md](docs/iretable-format.md).
+  [docs/iretable-format.md](docs/iretable-format.md). Scan options and which
+  panels are open are remembered separately, in a plain `settings.ini` beside the
+  logs, because they belong to the installation rather than to a project.
 - **Diagnostics** — structured log with per-thread ids and a level filter, and
   automatic minidumps on crash (including uncaught C++ exceptions, not just
   access violations).
