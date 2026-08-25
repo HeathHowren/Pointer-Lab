@@ -37,11 +37,7 @@ void copyPath(wchar_t (&destination)[MAX_PATH], const std::filesystem::path& pat
     destination[count] = L'\0';
 }
 
-bool writeMinidump(EXCEPTION_POINTERS* exceptionInfo) {
-    if (g_dumpPath[0] == L'\0') {
-        return false;
-    }
-
+bool writeDumpOfType(EXCEPTION_POINTERS* exceptionInfo, MINIDUMP_TYPE type) {
     HANDLE file = CreateFileW(g_dumpPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         return false;
@@ -52,18 +48,37 @@ bool writeMinidump(EXCEPTION_POINTERS* exceptionInfo) {
     information.ExceptionPointers = exceptionInfo;
     information.ClientPointers = FALSE;
 
-    // Enough to get a usable stack and the values around it without writing out
-    // the entire address space, which for this application can be very large.
-    const auto type = static_cast<MINIDUMP_TYPE>(MiniDumpWithIndirectlyReferencedMemory |
-                                                 MiniDumpWithDataSegs |
-                                                 MiniDumpWithHandleData |
-                                                 MiniDumpWithThreadInfo |
-                                                 MiniDumpWithUnloadedModules);
-
     const BOOL written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type,
                                            exceptionInfo != nullptr ? &information : nullptr, nullptr, nullptr);
     CloseHandle(file);
     return written != FALSE;
+}
+
+bool writeMinidump(EXCEPTION_POINTERS* exceptionInfo) {
+    if (g_dumpPath[0] == L'\0') {
+        return false;
+    }
+
+    // Enough to get a usable stack and the values around it without writing out
+    // the entire address space, which for this application can be very large.
+    const auto rich = static_cast<MINIDUMP_TYPE>(MiniDumpWithIndirectlyReferencedMemory |
+                                                 MiniDumpWithDataSegs |
+                                                 MiniDumpWithHandleData |
+                                                 MiniDumpWithThreadInfo |
+                                                 MiniDumpWithUnloadedModules);
+    if (writeDumpOfType(exceptionInfo, rich)) {
+        return true;
+    }
+
+    // MiniDumpWithIndirectlyReferencedMemory walks everything the stack points
+    // at, and that walk is the part that fails: it can come back false after
+    // having already written most of the file, which is how a crash could leave
+    // behind a large .dmp and a log line saying no dump was written. It is
+    // worst on the terminate path, where an exception is still in flight while
+    // the walk runs. A plain dump needs no walk, so start the file again as one
+    // rather than keep a partial dump nobody is told to send. A stack-only dump
+    // is much less than the full one and much more than nothing.
+    return writeDumpOfType(exceptionInfo, MiniDumpNormal);
 }
 
 // Deliberately uses the raw Win32 file API rather than the Logger: the Logger
