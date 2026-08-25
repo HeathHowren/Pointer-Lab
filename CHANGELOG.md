@@ -3,7 +3,15 @@
 All notable changes to Pointer Lab are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.1.0] — 2026-08-22
+
+A feature release, and the first one that is not mostly repair work. Every item
+in it closes a gap that 2.0.0 documented as a known limit rather than fixed.
+
+Nothing in it is breaking: `.iretable` project files are still **format version
+3**, the licence is unchanged, and every existing workflow behaves as it did.
+Software breakpoints remain the default, and settings live in their own file
+rather than in the project format.
 
 ### Added
 
@@ -99,6 +107,16 @@ All notable changes to Pointer Lab are recorded here. This project follows
   every panel is still one method; only which file each lives in has moved. The
   helpers the panels share moved from an anonymous namespace into
   `src/ui/UiInternal.h`.
+
+### Known limits
+
+Still true, and still stated rather than hidden — see the README for the full
+list. A software breakpoint can be missed during its single-step window, which is
+inherent to `int3`; use a hardware breakpoint when it matters. There are only
+four hardware breakpoints, because the processor has four debug registers.
+Breakpoint notifications are rate limited (hit counts are not). Time inside a
+Lua C function is still not interruptible. Partial reads succeed with a short
+buffer. 64-bit targets only.
 
 ## [2.0.0] — 2026-08-18
 
