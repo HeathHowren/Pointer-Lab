@@ -154,6 +154,21 @@ add_library(pointerlab_core STATIC
     src/storage/ProjectStore.cpp
 )
 
+# UiApp is one class across several translation units, grouped by area. It was a
+# single 2500-line file, roughly five times the next largest, and the only
+# component with no test coverage.
+set(POINTERLAB_UI_SOURCES
+    src/ui/UiApp.cpp
+    src/ui/UiLayout.cpp
+    src/ui/UiMenu.cpp
+    src/ui/UiPanelsTarget.cpp
+    src/ui/UiPanelsScan.cpp
+    src/ui/UiPanelsMemory.cpp
+    src/ui/UiPanelsTools.cpp
+    src/ui/UiProject.cpp
+    src/ui/UiWindows.cpp
+)
+
 # PUBLIC so the executable and the test binary inherit C++20 as well.
 target_compile_features(pointerlab_core PUBLIC cxx_std_20)
 
@@ -195,7 +210,7 @@ target_link_libraries(pointerlab_core
 add_executable(PointerLab WIN32
     src/main.cpp
     src/app/Application.cpp
-    src/ui/UiApp.cpp
+    ${POINTERLAB_UI_SOURCES}
     resources/PointerLab.rc
 )
 
