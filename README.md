@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.svg" width="96" alt="Pointer Lab logo">
+</p>
+
 # Pointer Lab
 
 A Windows x64 user-mode memory research tool built in C++20 with a Dear ImGui dockspace UI.
