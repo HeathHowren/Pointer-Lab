@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <cstdlib>
 #include <sstream>
 
 namespace ire::platform_win32 {
@@ -490,6 +492,58 @@ void captureRegisters(const CONTEXT& context, std::uint32_t threadId, domain::Re
 }
 
 } // namespace
+
+GlobalHotkeys::~GlobalHotkeys() {
+    unregisterAll();
+}
+
+std::optional<int> GlobalHotkeys::idFor(const std::string& name) {
+    if (name.size() < 2 || (name.front() != 'F' && name.front() != 'f')) {
+        return std::nullopt;
+    }
+    const auto digits = name.substr(1);
+    if (!std::all_of(digits.begin(), digits.end(), [](unsigned char ch) { return std::isdigit(ch) != 0; })) {
+        return std::nullopt;
+    }
+    const int id = std::atoi(digits.c_str());
+    if (id < firstId || id > lastId) {
+        return std::nullopt;
+    }
+    return id;
+}
+
+std::vector<int> GlobalHotkeys::apply(HWND window, const std::set<int>& wanted) {
+    unregisterAll();
+    window_ = window;
+    if (window_ == nullptr) {
+        return {std::vector<int>(wanted.begin(), wanted.end())};
+    }
+
+    std::vector<int> refused;
+    for (const int id : wanted) {
+        if (id < firstId || id > lastId) {
+            continue;
+        }
+        // MOD_NOREPEAT: holding the key down should toggle a freeze once, not
+        // thirty times a second for as long as it is held.
+        const UINT key = VK_F1 + static_cast<UINT>(id - firstId);
+        if (RegisterHotKey(window_, id, MOD_NOREPEAT, key)) {
+            registered_.insert(id);
+        } else {
+            refused.push_back(id);
+        }
+    }
+    return refused;
+}
+
+void GlobalHotkeys::unregisterAll() {
+    if (window_ != nullptr) {
+        for (const int id : registered_) {
+            UnregisterHotKey(window_, id);
+        }
+    }
+    registered_.clear();
+}
 
 DebugEventPump::~DebugEventPump() {
     detach();
