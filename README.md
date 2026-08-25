@@ -52,10 +52,13 @@ silently.
   than hidden.
 - **Address list** — groups, descriptions, value freeze, manual add and edit,
   F1–F12 in-window hotkey toggles.
-- **Pointer scanner** — multi-level pointer chain search. Chains are stored as
-  `module+offset` plus offsets, so a chain found in one run still resolves after
-  the target restarts and ASLR moves everything. Resolved chains can be added to
-  the address list as live tracked entries.
+- **Pointer scanner** — multi-level pointer chain search with a rescan pass.
+  Chains are stored as `module+offset` plus offsets, so a chain found in one run
+  still resolves after the target restarts and ASLR moves everything. Restart the
+  target, find the value's new address and rescan: the chains that still resolve
+  to it are the ones that genuinely track the value, and the thousands that only
+  pointed the right way once are discarded. Resolved chains can be added to the
+  address list as live tracked entries.
 - **Memory viewer** — hex display with live patching.
 - **Disassembler** — full x86-64 disassembly via [Zydis](https://github.com/zyantific/zydis),
   with follow-branch navigation. Undecodable bytes are shown as `db` rather than
@@ -83,8 +86,6 @@ silently.
 
 Stated plainly, because a tool that overstates itself wastes your time:
 
-- The pointer scanner has no rescan/filter pass. Narrow results by lowering the
-  depth or the maximum offset.
 - A software breakpoint can be missed by another thread during the single-step
   window in which it is temporarily disarmed. This is inherent to `int3`
   breakpoints and is not specific to Pointer Lab.

@@ -1583,6 +1583,10 @@ void UiApp::renderPointerPanel() {
     const auto typeNames = valueTypeNames();
     ImGui::Combo("Value type", &pointerTypeIndex_, typeNames.data(), static_cast<int>(typeNames.size()));
 
+    // Fetched once: the table below needs it too, and copying every chain twice
+    // a frame is not free once a scan has found thousands of them.
+    const auto chains = services_.pointerScanJob().results();
+
     if (ImGui::Button("Start pointer scan")) {
         if (!services_.session().attached()) {
             notifyError("Attach to a process first.");
@@ -1596,6 +1600,23 @@ void UiApp::renderPointerPanel() {
             notifyError("Target address is not valid hexadecimal.");
         }
     }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(chains.empty() || services_.pointerScanJob().progress().running);
+    if (ImGui::Button("Rescan")) {
+        if (!services_.session().attached()) {
+            notifyError("Attach to a process first.");
+        } else if (auto target = parseAddress(pointerTarget_.data())) {
+            services_.pointerScanJob().filter(*target);
+        } else {
+            notifyError("Target address is not valid hexadecimal.");
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    helpMarker("Keeps only the chains that still resolve to the target address above, and discards the "
+               "rest. A first scan finds thousands of chains that pointed the right way once. Restart "
+               "the target, find the value's new address, put it in Target address and rescan: what "
+               "survives is what actually tracks the value. Rescanning costs seconds, not minutes.");
     if (services_.pointerScanJob().progress().running) {
         ImGui::SameLine();
         if (ImGui::Button("Cancel pointer scan")) {
@@ -1607,7 +1628,6 @@ void UiApp::renderPointerPanel() {
     ImGui::TextDisabled(
         "Adding a chain tracks it as module+offset, so it re-resolves itself when the target restarts.");
 
-    const auto chains = services_.pointerScanJob().results();
     if (ImGui::BeginTable("pointer-results", 5, denseTableFlags | ImGuiTableFlags_ScrollY, ImVec2(0, 0))) {
         ImGui::TableSetupColumn("Module", ImGuiTableColumnFlags_WidthFixed, 150.0f);
         ImGui::TableSetupColumn("Base", ImGuiTableColumnFlags_WidthFixed, 170.0f);
