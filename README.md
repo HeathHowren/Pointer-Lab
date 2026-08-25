@@ -67,9 +67,12 @@ silently.
   Patches are NOP-padded to the next instruction boundary so a short patch never
   leaves half an instruction behind, and the confirmation dialog tells you
   exactly how many bytes will be overwritten.
-- **Breakpoints** — repeatable user-mode software breakpoints (`int3`) via the
-  Windows debug APIs, with RIP rewind, single-step and re-arm, so the target
-  keeps running and the hit count climbs. Register context is captured on hit.
+- **Breakpoints** — repeatable user-mode breakpoints via the Windows debug APIs,
+  so the target keeps running and the hit count climbs. Register context is
+  captured on hit. Software (`int3`) breakpoints rewind RIP, single-step and
+  re-arm; hardware breakpoints use the CPU's four debug registers instead, never
+  modify the target and are never disarmed, and can break on data being written
+  or read rather than only on code being executed.
 - **Injection** — remote allocation, remote thread creation and `LoadLibraryW`
   helpers, each behind a confirmation dialog.
 - **Lua scripting** — embedded Lua 5.4 console running off the UI thread, with a
@@ -88,7 +91,10 @@ Stated plainly, because a tool that overstates itself wastes your time:
 
 - A software breakpoint can be missed by another thread during the single-step
   window in which it is temporarily disarmed. This is inherent to `int3`
-  breakpoints and is not specific to Pointer Lab.
+  breakpoints and is not specific to Pointer Lab; use a hardware breakpoint,
+  which is never disarmed, when it matters.
+- There are only four hardware breakpoints, because the processor has four debug
+  registers. The fifth is refused rather than silently replacing one.
 - Breakpoint hit *notifications* are rate-limited to one every 500 ms so a
   breakpoint in a hot loop cannot flood the UI. The hit count in the breakpoint
   table is the authoritative record.

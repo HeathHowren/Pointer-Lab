@@ -60,7 +60,12 @@ public:
 
     infra::Result<void> attachDebugger();
     void detachDebugger();
-    infra::Result<void> addBreakpoint(std::uintptr_t address, std::string label);
+    // kind defaults to a software int3; a hardware kind takes one of the four
+    // debug registers instead and can watch data rather than execution. length
+    // is the width a data breakpoint watches (1, 2, 4 or 8 bytes).
+    infra::Result<void> addBreakpoint(std::uintptr_t address, std::string label,
+                                      domain::BreakpointKind kind = domain::BreakpointKind::Software,
+                                      std::uint8_t length = 1);
     infra::Result<void> removeBreakpoint(std::uintptr_t address);
     [[nodiscard]] std::vector<domain::BreakpointInfo> breakpoints() const;
     [[nodiscard]] bool debuggerAttached() const;

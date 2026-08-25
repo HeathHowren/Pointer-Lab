@@ -232,6 +232,143 @@ TEST_CASE("Breakpoints cannot be set before the debugger attaches", "[breakpoint
     CHECK_FALSE(pump.attached());
 }
 
+// Hardware breakpoints. The point of them is that nothing in the target is
+// modified and nothing is ever disarmed, so the single-step window a software
+// breakpoint can be missed through does not exist.
+TEST_CASE("A hardware execute breakpoint fires repeatedly without patching the target",
+          "[breakpoint][hardware][integration]") {
+    AttachedHelper fixture;
+    services::BreakpointService breakpoints(fixture.session);
+
+    const auto tick = fixture.helper.tick();
+    const auto original = readByte(fixture.session, tick);
+    const auto ticksBefore = fixture.helper.ticks();
+    REQUIRE(ticksBefore >= 0);
+
+    REQUIRE(breakpoints.attachDebugger().has_value());
+    auto added = breakpoints.addBreakpoint(tick, "tick", domain::BreakpointKind::HardwareExecute);
+    INFO("add: " << added.error());
+    REQUIRE(added.has_value());
+
+    REQUIRE(waitForHits(breakpoints, tick, 25));
+
+    // The whole difference from a software breakpoint: the instruction stream is
+    // untouched. No int3 was ever written, so there is nothing to restore.
+    CHECK(readByte(fixture.session, tick) == original);
+
+    const auto list = breakpoints.breakpoints();
+    REQUIRE(list.size() == 1);
+    CHECK(list[0].kind == domain::BreakpointKind::HardwareExecute);
+    CHECK(list[0].slot >= 0);
+    CHECK(list[0].slot < 4);
+    REQUIRE(list[0].lastHit.captured);
+    // An execute breakpoint faults before the instruction runs, so RIP is the
+    // breakpoint itself rather than something past it.
+    CHECK(list[0].lastHit.rip == tick);
+
+    // Still executing the loop it is breaking on. If the resume flag were not
+    // set the thread would fault on the same instruction forever and this would
+    // not move.
+    const auto ticksDuring = fixture.helper.ticks();
+    CHECK(ticksDuring > ticksBefore);
+
+    breakpoints.detachDebugger();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(fixture.helper.get() == needleValue);
+    CHECK(fixture.helper.ticks() > ticksDuring);
+}
+
+// The other thing only hardware can do: break on data being touched rather than
+// on code running.
+TEST_CASE("A hardware write watchpoint fires when the value is written", "[breakpoint][hardware][integration]") {
+    AttachedHelper fixture;
+    services::BreakpointService breakpoints(fixture.session);
+
+    const auto needle = fixture.helper.address();
+    REQUIRE(breakpoints.attachDebugger().has_value());
+    auto added = breakpoints.addBreakpoint(needle, "needle", domain::BreakpointKind::HardwareWrite, 4);
+    INFO("add: " << added.error());
+    REQUIRE(added.has_value());
+
+    // Reading it must not trip a write watchpoint.
+    CHECK(fixture.helper.get() == needleValue);
+    CHECK(breakpoints.breakpoints().front().hitCount == 0);
+
+    // Writing it must.
+    REQUIRE(fixture.helper.set(4321));
+    REQUIRE(waitForHits(breakpoints, needle, 1));
+
+    const auto list = breakpoints.breakpoints();
+    REQUIRE(list.size() == 1);
+    CHECK(list[0].kind == domain::BreakpointKind::HardwareWrite);
+    CHECK(list[0].length == 4);
+    REQUIRE(list[0].lastHit.captured);
+    CHECK(list[0].lastHit.threadId != 0);
+
+    breakpoints.detachDebugger();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(fixture.helper.get() == 4321);
+    CHECK(fixture.helper.ticks() > 0);
+}
+
+TEST_CASE("There are exactly four hardware breakpoints and the fifth says so",
+          "[breakpoint][hardware][integration]") {
+    AttachedHelper fixture;
+    services::BreakpointService breakpoints(fixture.session);
+
+    const auto base = fixture.helper.scratch();
+    REQUIRE(breakpoints.attachDebugger().has_value());
+
+    for (int slot = 0; slot < 4; ++slot) {
+        const auto address = base + static_cast<std::uintptr_t>(slot) * 8;
+        INFO("slot " << slot);
+        auto added = breakpoints.addBreakpoint(address, "watch", domain::BreakpointKind::HardwareWrite, 1);
+        INFO("add: " << added.error());
+        REQUIRE(added.has_value());
+    }
+
+    // A limit of the processor, reported rather than worked around.
+    auto fifth = breakpoints.addBreakpoint(base + 32, "too many", domain::BreakpointKind::HardwareWrite, 1);
+    REQUIRE_FALSE(fifth.has_value());
+    CHECK(fifth.error().find("four") != std::string::npos);
+    CHECK(breakpoints.breakpoints().size() == 4);
+
+    // A software breakpoint uses no debug register, so it is still available.
+    REQUIRE(fixture.session.writeBytes(base + 64, std::vector<std::uint8_t>{0x90}).has_value());
+    CHECK(breakpoints.addBreakpoint(base + 64, "software").has_value());
+
+    // Freeing a register makes room again.
+    REQUIRE(breakpoints.removeBreakpoint(base).has_value());
+    CHECK(breakpoints.addBreakpoint(base + 32, "now it fits", domain::BreakpointKind::HardwareWrite, 1).has_value());
+
+    breakpoints.detachDebugger();
+    CHECK(fixture.helper.ticks() >= 0);
+}
+
+TEST_CASE("A hardware watchpoint rejects a width the registers cannot encode",
+          "[breakpoint][hardware][integration]") {
+    AttachedHelper fixture;
+    services::BreakpointService breakpoints(fixture.session);
+
+    const auto base = fixture.helper.scratch();
+    REQUIRE(breakpoints.attachDebugger().has_value());
+
+    SECTION("a width that is not 1, 2, 4 or 8") {
+        auto added = breakpoints.addBreakpoint(base, "three", domain::BreakpointKind::HardwareWrite, 3);
+        REQUIRE_FALSE(added.has_value());
+        CHECK(added.error().find("1, 2, 4 or 8") != std::string::npos);
+    }
+    SECTION("an address not aligned to its width") {
+        auto added = breakpoints.addBreakpoint(base + 1, "misaligned", domain::BreakpointKind::HardwareWrite, 4);
+        REQUIRE_FALSE(added.has_value());
+        CHECK(added.error().find("aligned") != std::string::npos);
+    }
+    CHECK(breakpoints.breakpoints().empty());
+
+    breakpoints.detachDebugger();
+    CHECK(fixture.helper.ticks() >= 0);
+}
+
 TEST_CASE("Hits are reported to the UI without touching it from the pump thread", "[breakpoint][integration]") {
     AttachedHelper fixture;
     services::BreakpointService breakpoints(fixture.session);
