@@ -82,6 +82,9 @@ private:
     bool loadProjectFrom(const std::filesystem::path& path, bool quiet);
     void loadSession();
     void saveSession();
+    // Preferences that belong to the installation rather than to a project.
+    void loadSettings();
+    void saveSettings();
     [[nodiscard]] std::string projectTitle() const;
 
     // Queues a confirmation dialog; action runs only if the user accepts.
