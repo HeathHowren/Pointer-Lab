@@ -30,6 +30,7 @@ add_executable(pointerlab_tests
     test_scan_integration.cpp
     test_asm_disasm.cpp
     test_breakpoints.cpp
+    test_hotkeys.cpp
     test_pointer.cpp
     test_lua.cpp
     test_workflow.cpp
