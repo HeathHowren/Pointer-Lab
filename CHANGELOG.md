@@ -450,6 +450,19 @@ marked as new in this changelog after 3.0.0 ships.
   against a struct layout in which every embedded pointer was a different size,
   so the chain still resolves, to the wrong field.
 
+### Fixed
+
+- **An uncaught C++ exception left a crash dump behind and a crash log saying
+  none had been written.** `MiniDumpWriteDump` was walking the stack of the very
+  thread that called it, and on the terminate path that walk runs with an
+  exception still in flight underneath it: the call writes most of the file and
+  then returns false. The dump is now written from a thread created for the job,
+  which has a clean stack and nothing in flight, and DbgHelp suspends and walks
+  the crashing thread the way it would from an external debugger — the
+  arrangement the API is documented for. The reason a dump failed is written
+  into the crash log too, so the next report of this kind says what went wrong
+  rather than only that something did.
+
 ## [2.1.0] — 2026-08-22
 
 A feature release, and the first one that is not mostly repair work. Every item
