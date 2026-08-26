@@ -20,7 +20,13 @@ enum class ValueType {
     UInt64,
     Float,
     Double,
-    Bytes
+    Bytes,
+    // Both are variable length, like Bytes: valueTypeSize returns 0 and the
+    // length comes from the text being searched for. StringUtf16 is what
+    // Windows means by "Unicode" -- two bytes per character, which is how
+    // almost every player name and chat line is stored in a Windows game.
+    StringAscii,
+    StringUtf16
 };
 
 enum class ScanMode {
@@ -29,8 +35,44 @@ enum class ScanMode {
     Changed,
     Unchanged,
     Increased,
-    Decreased
+    Decreased,
+    // Absolute filters: they test the value as it is now, so unlike the four
+    // above they work on a first scan with nothing to compare against.
+    ValueBetween,
+    BiggerThan,
+    SmallerThan,
+    // Relative filters. IncreasedBy/DecreasedBy take an exact delta, which is
+    // what turns "I took some damage" into "I took exactly 7 damage" and
+    // usually finishes a search in one step.
+    IncreasedBy,
+    DecreasedBy,
+    // Compares against the value captured on the *first* scan of the run, not
+    // the one before this. That is what makes it useful: a value that went up
+    // and came back down is unchanged from the first scan but changed from the
+    // previous one.
+    SameAsFirst
 };
+
+// Pointer width of the attached target.
+//
+// A 64-bit Pointer Lab can attach to a 32-bit (WOW64) process perfectly well --
+// ReadProcessMemory does not care -- but almost everything above the raw read
+// does: a pointer chain steps 4 bytes at a time rather than 8, Zydis and
+// Keystone need the matching machine mode, and an address formats to 8 hex
+// digits rather than 16. Guessing wrong is not a cosmetic error; a pointer scan
+// that reads 8-byte pointers out of a 32-bit process finds nothing at all.
+enum class Bitness {
+    X86,
+    X64
+};
+
+[[nodiscard]] constexpr std::size_t pointerSize(Bitness bitness) {
+    return bitness == Bitness::X86 ? 4u : 8u;
+}
+
+[[nodiscard]] constexpr const char* bitnessName(Bitness bitness) {
+    return bitness == Bitness::X86 ? "32-bit" : "64-bit";
+}
 
 struct ProcessInfo {
     std::uint32_t pid{};
@@ -62,6 +104,14 @@ struct ScanValue {
     // Empty means every byte is compared.
     std::vector<std::uint8_t> mask;
     std::string text;
+    // The second operand, for the modes that take one: the upper bound of
+    // ValueBetween, or the delta of IncreasedBy/DecreasedBy. Empty otherwise.
+    std::vector<std::uint8_t> bytes2;
+    std::string text2;
+    // String scans only. Case folding happens at comparison time rather than
+    // by folding the needle, because the bytes in the target are not ours to
+    // normalise.
+    bool caseInsensitive{};
 };
 
 // A byte pattern with optional '?' / '??' wildcards, e.g. "48 8B ?? 24".
@@ -78,15 +128,27 @@ struct ScanResult {
     std::uintptr_t address{};
     std::vector<std::uint8_t> previous;
     std::vector<std::uint8_t> current;
+    // What was at this address on the *first* scan of the run, carried through
+    // every Next scan unchanged. Keeping only `previous` made "same as first
+    // scan" impossible to express: a value that rose and fell again is
+    // unchanged from the first scan and changed from the one before it, and
+    // those are different questions.
+    std::vector<std::uint8_t> first;
 };
 
 // A path from a static base to a value: read a pointer at the base, add the
 // first offset, read a pointer there, add the next, and so on.
 //
-// The base is stored as an offset within its module rather than as an absolute
-// address. That is the whole point of a pointer chain: ASLR puts the module
-// somewhere different every run, so an absolute base is worthless the moment
-// the target restarts.
+// The base is normally stored as an offset within its module rather than as an
+// absolute address. That is the whole point of a pointer chain: ASLR puts the
+// module somewhere different every run, so an absolute base is worthless the
+// moment the target restarts.
+//
+// An empty moduleName means moduleOffset is an absolute address instead. Only
+// manual entry produces those -- the scanner always roots a chain in a module --
+// and such a chain does not survive a restart. It is allowed because a reader
+// following a chain by hand in the hex editor has an absolute base and nothing
+// else, and refusing to record it would send them back to writing it on paper.
 struct PointerChain {
     std::wstring moduleName;
     std::uintptr_t moduleOffset{};
@@ -95,8 +157,12 @@ struct PointerChain {
     // used to resolve, or the chain would not survive a restart.
     std::uintptr_t moduleBase{};
 
+    [[nodiscard]] bool moduleRooted() const { return !moduleName.empty(); }
     [[nodiscard]] std::uintptr_t scanTimeBase() const { return moduleBase + moduleOffset; }
-    [[nodiscard]] bool valid() const { return !moduleName.empty() && !offsets.empty(); }
+    // Offsets may legitimately be empty for a manual entry: "the pointer at
+    // this address, dereferenced once" is a chain of length one with no
+    // trailing offset, and it is the first thing anyone types.
+    [[nodiscard]] bool valid() const { return moduleRooted() || moduleOffset != 0; }
 };
 
 struct AddressEntry {
@@ -139,7 +205,18 @@ struct RegisterContext {
     std::uint32_t eflags{};
     std::uint32_t threadId{};
     bool captured{};
+    // Which register set this actually came from. On a 32-bit target the fields
+    // above hold the zero-extended 32-bit registers and r8-r15 are always zero,
+    // so the UI has to label them EAX/EIP and hide the extended eight rather
+    // than displaying sixteen registers half of which cannot exist.
+    Bitness bitness{Bitness::X64};
 };
+
+// Register display names for a context, in the order the UI shows them. The
+// 32-bit list is deliberately shorter: r8-r15 do not exist in a WOW64 thread.
+[[nodiscard]] const char* registerName(Bitness bitness, std::size_t index);
+[[nodiscard]] std::size_t registerCount(Bitness bitness);
+[[nodiscard]] std::uint64_t registerValue(const RegisterContext& context, std::size_t index);
 
 // How a breakpoint is implemented inside the target.
 //
@@ -194,11 +271,23 @@ struct Instruction {
     bool valid{true};
 };
 
+// 0 for the variable-length types (Bytes and both strings), whose width comes
+// from the value being searched for rather than from the type.
 std::size_t valueTypeSize(ValueType type);
 const char* valueTypeName(ValueType type);
+[[nodiscard]] bool isStringType(ValueType type);
 const char* scanModeName(ScanMode mode);
 std::optional<ValueType> parseValueType(const std::string& text);
 std::vector<ValueType> valueTypes();
+// Every mode, in the order the UI offers them.
+std::vector<ScanMode> scanModes();
+// True for the modes that take a second operand: the upper bound of
+// ValueBetween, the delta of IncreasedBy/DecreasedBy.
+[[nodiscard]] bool modeUsesSecondValue(ScanMode mode);
+// True when the mode compares against a typed value at all. The rest compare
+// against what the previous scan saw, and asking for a value would be asking
+// for something that cannot be supplied.
+[[nodiscard]] bool modeUsesValue(ScanMode mode);
 std::string toHex(std::uintptr_t value);
 std::string bytesToHex(const std::vector<std::uint8_t>& bytes, bool spaces = true);
 std::vector<std::uint8_t> parseHexBytes(const std::string& text);

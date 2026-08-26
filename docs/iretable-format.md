@@ -12,6 +12,7 @@ The format is implemented in [`src/storage/ProjectStore.cpp`](../src/storage/Pro
 IRETABLE 3
 pid|4812
 process|helper.exe
+bitness|x64
 entry|1|7ff6a1c02040|i32|1|Player health|Stats|F1|64000000|||
 entry|2|0|i32|0|Score|Stats||||helper.exe|3040|10,8
 ```
@@ -64,6 +65,115 @@ process|<process name>
 
 The executable name of the last target, for display.
 
+### `bitness`
+
+```
+bitness|x86
+bitness|x64
+```
+
+Pointer width of the process this table was built against. Loading a table
+against a target of the other bitness raises a warning: pointer chains survive a
+restart, because they are stored as `module+offset`, but they do not survive a
+change of architecture — every embedded pointer in the target's structures
+changes size, so the offsets no longer name the fields they were measured
+against. The chain still resolves; it resolves to the wrong place.
+
+Absent from files written before this record existed, in which case `x64` is
+assumed — every such file was written by a build that could only attach to
+64-bit targets.
+
+Note that this record was added **without** a format version bump, deliberately.
+Unrecognised record types have always been skipped rather than rejected, so a
+2.1.0 build reads a file containing this line and simply ignores it; writing
+`IRETABLE 4` would instead have made it refuse the table outright.
+
+### `symbol`
+
+```
+symbol|health|game.exe+0x4A2C10
+symbol|loadlib|kernel32.LoadLibraryW
+```
+
+A user-defined name, stored as the **expression** that produced it rather than
+as the address that expression resolved to. This is the whole point: an address
+recorded in one run names nothing in the next, because ASLR has moved the
+module, whereas `game.exe+0x4A2C10` names the same thing every time.
+
+On load each expression is re-resolved against the currently attached target. A
+symbol whose module is not loaded is reported and dropped rather than restored
+to a stale address; the count is shown and each failure is named in the log.
+
+Symbols defined against a bare address, with no expression behind them, are not
+saved at all, for the same reason.
+
+Added without a format version bump, exactly as `bitness` was and for the same
+reason.
+
+### `script`
+
+```
+script|infinite health|[ENABLE]\naobscanmodule(INJECT, game.exe, 89 46 04)\n...
+```
+
+One auto-assembler script: a name and its source. The source is a single field
+however long it is, because the escaping turns each newline into `\n` — so a
+script is always exactly one line of the file.
+
+Scripts are **always loaded switched off**, and the enabled flag is deliberately
+not stored. At load time there is no target and nothing has been patched; a
+script that claimed to be on would be offering to undo changes that were never
+made. It also means the reader gets to look at a script before it runs, which is
+the right default for a file that may have arrived from someone else.
+
+A script with an empty source is kept if it has a name — that is a script
+someone started and has not written yet, and silently dropping it would be worse
+than carrying a blank one. A record with neither is ignored.
+
+Added without a format version bump, exactly as `bitness` and `symbol` were and
+for the same reason.
+
+### `struct` and `field`
+
+```
+struct|Player
+field|0|u64|0|vtable
+field|8|f32|0|health
+field|10|bytes|c|name
+```
+
+A structure definition: a `struct` header naming it, then one `field` line per
+member, in offset order. Fields belong to the `struct` record above them, and a
+`field` with no `struct` above it is **ignored with a warning** rather than
+attached to whatever comes next — a layout in the wrong structure is worse than
+a missing one.
+
+Field columns, in order: offset (hex, no `0x`), value type, length (decimal),
+name. The length is meaningful only for the variable-width types — `bytes`,
+`str` and `wstr` — and is where their width comes from; for everything else it
+is written as `0` and the width comes from the type. A field that ends up with
+no width at all is skipped.
+
+Offsets are written as the **unsigned bit pattern**, the same convention as
+pointer-chain offsets, so a negative offset round-trips exactly. Negative
+offsets are legal and ordinary: where an object starts is a guess, and
+discovering that the real one begins four bytes earlier should not mean
+renumbering everything below it.
+
+Fields could have been packed into the header line. They are not, because a
+layout is the record in this file most likely to be read and edited by hand, and
+one field per line is what makes that bearable.
+
+The **addresses** a structure was last laid over are deliberately not saved. A
+layout is knowledge about the game and outlives every run; the address of one
+particular enemy does not survive the next respawn.
+
+Structure ids are assigned when the file is read rather than stored, because
+nothing outside a single run refers to one.
+
+Added without a format version bump, exactly as `bitness`, `symbol` and `script`
+were and for the same reason.
+
 ### `entry`
 
 One address-list row. Fields in order:
@@ -79,9 +189,9 @@ One address-list row. Fields in order:
 | 6 | group | escaped text | |
 | 7 | hotkey | escaped text | e.g. `F1`; empty for none |
 | 8 | frozen value | hex bytes | The value written while frozen |
-| 9 | chain module | escaped text | Empty for a fixed address |
-| 10 | chain module offset | hex, no `0x` | Only read if field 9 is non-empty |
-| 11 | chain offsets | comma-separated hex | Only read if field 9 is non-empty |
+| 9 | chain module | escaped text | Empty for a fixed address, or for a chain with an absolute base |
+| 10 | chain module offset | hex, no `0x` | Absolute base when field 9 is empty |
+| 11 | chain offsets | comma-separated hex | May be empty: see below |
 
 Fields 0–8 are required; a row with fewer than nine fields is skipped. Fields
 9–11 were added in version 3 and are absent in version 1 and 2 files, which
@@ -93,8 +203,13 @@ loads.
 
 #### Value types
 
-`i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `bytes`.
-Matching is case-insensitive on read; Pointer Lab always writes lower case.
+`i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `bytes`,
+`str`, `wstr`. Matching is case-insensitive on read; Pointer Lab always writes
+lower case.
+
+`str` is one byte per character and `wstr` is UTF-16, two bytes per character —
+what Windows calls "Unicode". Both are variable length, like `bytes`: the width
+comes from the value, not from the type.
 
 An unrecognised type **skips the entry** rather than falling back to a default.
 A wrong width would silently read and write the wrong number of bytes at that
@@ -102,8 +217,10 @@ address, which is worse than losing the row.
 
 #### Pointer chains
 
-When field 9 is non-empty the entry is backed by a pointer chain rather than a
-fixed address. The chain is stored relative to a module so it survives ASLR:
+An entry is backed by a pointer chain, rather than a fixed address, when field 9
+is non-empty **or** field 10 is non-zero. A chain produced by the pointer scanner
+is always module-rooted; a manually entered one need not be. The module-rooted
+form is stored relative to its module so it survives ASLR:
 
 ```
 entry|2|0|i32|0|Score|Stats||||helper.exe|3040|10,8
@@ -112,8 +229,24 @@ entry|2|0|i32|0|Score|Stats||||helper.exe|3040|10,8
 means: find `helper.exe` in the target, add `0x3040` to get the chain root, read
 a pointer there, add `0x10`, read a pointer, add `0x8` — and that is the address.
 
-Offsets are written in hex without `0x` and separated by commas. An empty offset
-list, an empty element, or a non-hex element is malformed.
+Offsets are written in hex without `0x` and separated by commas, as the unsigned
+bit pattern — a manually entered chain may step backwards through a structure,
+and a negative offset written with a minus sign would only round-trip by
+accident. An empty element or a non-hex element is malformed.
+
+An **empty** offset list is not malformed. It means "the base itself, with no
+dereferencing", which is how a static address is written down:
+
+```
+entry|3|0|i32|0|Ammo|Stats||||helper.exe|3040|
+```
+
+is `helper.exe+0x3040`, re-resolved every run. Manual entry produces these; the
+pointer scanner never does.
+
+When field 9 is **empty** and field 10 is non-zero, field 10 is an absolute base
+rather than a module offset. Only manual entry produces such a chain, and it does
+not survive a restart — the address list marks it amber to say so.
 
 A malformed chain costs the **chain**, not the entry: the row is kept as a fixed
 address at field 2 and a warning is logged. That is deliberate — the address is

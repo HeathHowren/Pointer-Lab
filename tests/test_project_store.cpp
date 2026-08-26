@@ -323,7 +323,7 @@ TEST_CASE("A malformed chain degrades to a fixed address rather than failing", "
         "IRETABLE 3\n"
         "entry|1|140001000|i32|0|bad offsets|g||00|game.exe|1000|nothex\n"
         "entry|2|140002000|i32|0|bad module offset|g||00|game.exe|zzzz|10\n"
-        "entry|3|140003000|i32|0|empty offsets|g||00|game.exe|1000|\n"
+        "entry|3|140003000|i32|0|no offsets|g||00|game.exe|1000|\n"
         "entry|4|140004000|i32|0|good|g||00|game.exe|1000|10,20\n");
 
     auto loaded = store.load(file.path());
@@ -332,7 +332,168 @@ TEST_CASE("A malformed chain degrades to a fixed address rather than failing", "
     REQUIRE(loaded.value().entries.size() == 4);
     CHECK_FALSE(loaded.value().entries[0].chain.has_value());
     CHECK_FALSE(loaded.value().entries[1].chain.has_value());
-    CHECK_FALSE(loaded.value().entries[2].chain.has_value());
+    // Not broken: "module+offset, no dereferencing" is how a static address is
+    // written down, and manual entry produces exactly that.
+    REQUIRE(loaded.value().entries[2].chain.has_value());
+    CHECK(loaded.value().entries[2].chain->offsets.empty());
+    CHECK(loaded.value().entries[2].chain->moduleRooted());
     REQUIRE(loaded.value().entries[3].chain.has_value());
     CHECK(loaded.value().entries[3].chain->offsets == std::vector<std::ptrdiff_t>{0x10, 0x20});
+}
+
+TEST_CASE("Symbols survive a round trip as expressions, not addresses", "[storage]") {
+    const TempFile file("symbols.iretable");
+    const storage::ProjectStore store;
+
+    storage::ProjectTable table;
+    table.symbols.push_back({"health", "game.exe+0x4A2C10"});
+    table.symbols.push_back({"loadlib", "kernel32.LoadLibraryW"});
+    REQUIRE(store.save(file.path(), table).has_value());
+
+    auto loaded = store.load(file.path());
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded.value().symbols.size() == 2);
+    CHECK(loaded.value().symbols[0].name == "health");
+    // The expression, not the address it resolved to. An address from a
+    // previous run names nothing once ASLR has moved the module.
+    CHECK(loaded.value().symbols[0].expression == "game.exe+0x4A2C10");
+    CHECK(loaded.value().symbols[1].expression == "kernel32.LoadLibraryW");
+}
+
+TEST_CASE("Scripts survive a round trip with their line breaks intact", "[storage]") {
+    const TempFile file("scripts.iretable");
+    const storage::ProjectStore store;
+
+    // The whole source on one line of the file, with newlines and the field
+    // separator escaped. A script that came back with its lines run together
+    // would still look plausible in the editor and assemble to nonsense.
+    const std::string source =
+        "[ENABLE]\n"
+        "aobscanmodule(INJECT, game.exe, 89 46 04 8B ?? 08)\n"
+        "alloc(newmem, 0x100, INJECT)\n"
+        "newmem:\n"
+        "  mov [esi+04], eax  // a | in a comment must survive too\n"
+        "[DISABLE]\n"
+        "dealloc(newmem)\n";
+
+    storage::ProjectTable table;
+    table.scripts.push_back({"infinite health", source});
+    table.scripts.push_back({"empty", ""});
+    REQUIRE(store.save(file.path(), table).has_value());
+
+    auto loaded = store.load(file.path());
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded.value().scripts.size() == 2);
+    CHECK(loaded.value().scripts[0].name == "infinite health");
+    CHECK(loaded.value().scripts[0].source == source);
+    // A named script the user has not written yet is still theirs to keep.
+    CHECK(loaded.value().scripts[1].name == "empty");
+    CHECK(loaded.value().scripts[1].source.empty());
+}
+
+TEST_CASE("Structure layouts survive a round trip, negative offsets included", "[storage]") {
+    const TempFile file("structures.iretable");
+    const storage::ProjectStore store;
+
+    storage::ProjectTable table;
+    domain::Structure player;
+    player.name = "Player";
+    // Above the start of the object: the start is always a guess, and one that
+    // turned out to be four bytes late must still round-trip.
+    player.fields.push_back({-4, domain::ValueType::Int32, 0, "header"});
+    player.fields.push_back({0x00, domain::ValueType::UInt64, 0, "vtable"});
+    player.fields.push_back({0x08, domain::ValueType::Float, 0, "health"});
+    player.fields.push_back({0x10, domain::ValueType::Bytes, 12, "name"});
+    table.structures.push_back(player);
+
+    domain::Structure weapon;
+    weapon.name = "Weapon";
+    weapon.fields.push_back({0x00, domain::ValueType::Int32, 0, "ammo"});
+    table.structures.push_back(weapon);
+
+    REQUIRE(store.save(file.path(), table).has_value());
+
+    auto loaded = store.load(file.path());
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded.value().structures.size() == 2);
+
+    const auto& first = loaded.value().structures[0];
+    CHECK(first.name == "Player");
+    REQUIRE(first.fields.size() == 4);
+    CHECK(first.fields[0].offset == -4);
+    CHECK(first.fields[0].name == "header");
+    CHECK(first.fields[1].type == domain::ValueType::UInt64);
+    // The length only means anything for a variable-width type, and it is the
+    // only place it can come from.
+    CHECK(first.fields[3].type == domain::ValueType::Bytes);
+    CHECK(first.fields[3].length == 12);
+    CHECK(first.fields[3].size() == 12);
+
+    // Fields belong to the structure above them, so a second one does not
+    // inherit the first one's.
+    CHECK(loaded.value().structures[1].name == "Weapon");
+    CHECK(loaded.value().structures[1].fields.size() == 1);
+}
+
+TEST_CASE("A field record before any structure is ignored rather than misfiled", "[storage]") {
+    const TempFile file("orphanfield.iretable");
+    {
+        std::ofstream out(file.path(), std::ios::binary | std::ios::trunc);
+        out << "IRETABLE 3\n";
+        // A layout attached to the wrong structure is worse than a missing one,
+        // so this is dropped rather than given to whatever comes next.
+        out << "field|0|i32|0|orphan\n";
+        out << "struct|Player\n";
+        out << "field|4|f32|0|health\n";
+    }
+
+    const storage::ProjectStore store;
+    auto loaded = store.load(file.path());
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded.value().structures.size() == 1);
+    REQUIRE(loaded.value().structures[0].fields.size() == 1);
+    CHECK(loaded.value().structures[0].fields[0].name == "health");
+}
+
+TEST_CASE("A chain with an absolute base round-trips and stays absolute", "[storage]") {
+    const TempFile file("absolutechain.iretable");
+    const storage::ProjectStore store;
+
+    storage::ProjectTable table;
+    auto entry = makeEntry(1, 0x140001000, "manual chain");
+    domain::PointerChain chain;
+    // No module name: a base the user typed by hand, which resolves but does
+    // not survive a restart.
+    chain.moduleOffset = 0x7FF000001000ull;
+    chain.offsets = {0x10, -0x8};
+    entry.chain = chain;
+    table.entries.push_back(entry);
+    REQUIRE(store.save(file.path(), table).has_value());
+
+    auto loaded = store.load(file.path());
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded.value().entries.size() == 1);
+    const auto& reloaded = loaded.value().entries[0].chain;
+    REQUIRE(reloaded.has_value());
+    CHECK_FALSE(reloaded->moduleRooted());
+    CHECK(reloaded->moduleOffset == 0x7FF000001000ull);
+    // Including the negative one, which steps backwards through a structure.
+    CHECK(reloaded->offsets == std::vector<std::ptrdiff_t>{0x10, -0x8});
+}
+
+TEST_CASE("An unrecognised record is skipped rather than failing the load", "[storage]") {
+    const TempFile file("unknownrecord.iretable");
+    const storage::ProjectStore store;
+
+    // The property that lets new records be added without a version bump: an
+    // older build reading a newer file loses the line, not the table.
+    file.write(
+        "IRETABLE 3\n"
+        "somethingnew|whatever|else\n"
+        "entry|1|140001000|i32|0|kept|g||00\n");
+
+    auto loaded = store.load(file.path());
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded.value().entries.size() == 1);
+    CHECK(loaded.value().entries[0].description == "kept");
 }

@@ -57,16 +57,36 @@ public:
     infra::Result<void> writeMemory(HANDLE process, std::uintptr_t address, const void* data, std::size_t size) const;
     infra::Result<void> protectMemory(HANDLE process, std::uintptr_t address, std::size_t size, DWORD protection, DWORD* oldProtection) const;
     infra::Result<std::uintptr_t> allocate(HANDLE process, std::size_t size, DWORD protection) const;
+    // Allocates within reach of a 32-bit relative jump from `hint`.
+    //
+    // This is not a preference. A code cave is reached by overwriting an
+    // instruction with `jmp cave`, and the only jump short enough to fit in the
+    // five bytes usually available encodes its destination as a signed 32-bit
+    // displacement. If the allocation lands further than 2 GB away that jump
+    // cannot be encoded at all -- which on a 64-bit target is the normal
+    // outcome of a plain VirtualAllocEx, because the heap and the image are
+    // nowhere near each other.
+    //
+    // Fails rather than falling back to a far allocation: memory that cannot be
+    // jumped to is not a useful answer to "give me somewhere to put this code".
+    infra::Result<std::uintptr_t> allocateNear(HANDLE process, std::size_t size, DWORD protection,
+                                               std::uintptr_t hint) const;
     infra::Result<void> free(HANDLE process, std::uintptr_t address) const;
 
     // Fails with a distinct message on timeout rather than reporting
     // STILL_ACTIVE (259) as though it were the thread's exit code.
     infra::Result<std::uint32_t> createRemoteThread(HANDLE process, std::uintptr_t start, std::uintptr_t parameter,
                                                     DWORD timeoutMs = 5000) const;
-    infra::Result<std::uint32_t> injectLoadLibraryW(HANDLE process, const std::wstring& dllPath) const;
+    // loadLibraryAddress is LoadLibraryW *in the target's* address space. Zero
+    // means "use this process's own", which is correct only for a same-bitness
+    // target whose kernel32 happens to sit at the same base; callers that can
+    // resolve the export out of the target should always pass it.
+    infra::Result<std::uint32_t> injectLoadLibraryW(HANDLE process, const std::wstring& dllPath,
+                                                    std::uintptr_t loadLibraryAddress = 0) const;
 
-    // True when the target runs under WOW64 (a 32-bit process) and therefore
-    // cannot be injected into from this 64-bit build.
+    // True when the target runs under WOW64, i.e. a 32-bit process on 64-bit
+    // Windows. Pointer Lab can attach to, scan, patch and debug one; what it
+    // cannot do is assume its own pointer width or module bases apply there.
     static bool isWow64(HANDLE process);
     // Requests SeDebugPrivilege; without it many processes cannot be opened.
     static infra::Result<void> enableDebugPrivilege();
@@ -199,6 +219,11 @@ private:
     Win32Platform platform_;
     std::uint32_t pid_{};
     UniqueHandle process_;
+    // Whether the target is a 32-bit (WOW64) process, decided once at attach.
+    // Every thread-context call in the pump has to use the matching API family:
+    // the 64-bit context of a WOW64 thread describes Windows' emulation layer
+    // rather than the target's own code.
+    bool wow64_{};
     std::atomic<bool> attached_{false};
     std::atomic<bool> stop_{false};
     // Set when the target itself exited, so we do not try to detach from a

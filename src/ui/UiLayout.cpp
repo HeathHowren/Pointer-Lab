@@ -145,6 +145,17 @@ void UiApp::buildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size) {
     ImGui::DockBuilderDockWindow("Scanner",           centerTop);
     ImGui::DockBuilderDockWindow("Address List",      centerBottom);
 
+    // The panels that open on demand rather than on start. They still need a
+    // home, or the first time one is opened it appears as a small floating
+    // window over the middle of everything. They share the Address List's tab
+    // bar, which stays uncluttered because a closed panel has no tab.
+    ImGui::DockBuilderDockWindow("Access Watch",      centerBottom);
+    ImGui::DockBuilderDockWindow("Patches",           centerBottom);
+    ImGui::DockBuilderDockWindow("Symbols",           centerBottom);
+    ImGui::DockBuilderDockWindow("Scripts",           centerBottom);
+    ImGui::DockBuilderDockWindow("Structures",        centerBottom);
+    ImGui::DockBuilderDockWindow("Speed and Export",  centerBottom);
+
     ImGui::DockBuilderDockWindow("Memory Viewer",     right);
     ImGui::DockBuilderDockWindow("Disassembly",       right);
     ImGui::DockBuilderDockWindow("Breakpoints",       right);

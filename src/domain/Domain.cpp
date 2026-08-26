@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstring>
 #include <iomanip>
+#include <iterator>
 #include <sstream>
 #include <stdexcept>
 
@@ -50,9 +51,15 @@ std::size_t valueTypeSize(ValueType type) {
     case ValueType::Int64:
     case ValueType::UInt64:
     case ValueType::Double: return 8;
-    case ValueType::Bytes: return 0;
+    case ValueType::Bytes:
+    case ValueType::StringAscii:
+    case ValueType::StringUtf16: return 0;
     }
     return 0;
+}
+
+bool isStringType(ValueType type) {
+    return type == ValueType::StringAscii || type == ValueType::StringUtf16;
 }
 
 const char* valueTypeName(ValueType type) {
@@ -68,20 +75,60 @@ const char* valueTypeName(ValueType type) {
     case ValueType::Float: return "f32";
     case ValueType::Double: return "f64";
     case ValueType::Bytes: return "bytes";
+    case ValueType::StringAscii: return "str";
+    case ValueType::StringUtf16: return "wstr";
     }
     return "unknown";
 }
 
 const char* scanModeName(ScanMode mode) {
     switch (mode) {
-    case ScanMode::Exact: return "Exact";
-    case ScanMode::UnknownInitial: return "Unknown initial";
-    case ScanMode::Changed: return "Changed";
-    case ScanMode::Unchanged: return "Unchanged";
-    case ScanMode::Increased: return "Increased";
-    case ScanMode::Decreased: return "Decreased";
+    case ScanMode::Exact: return "Exact value";
+    case ScanMode::UnknownInitial: return "Unknown initial value";
+    case ScanMode::Changed: return "Changed value";
+    case ScanMode::Unchanged: return "Unchanged value";
+    case ScanMode::Increased: return "Increased value";
+    case ScanMode::Decreased: return "Decreased value";
+    case ScanMode::ValueBetween: return "Value between";
+    case ScanMode::BiggerThan: return "Bigger than";
+    case ScanMode::SmallerThan: return "Smaller than";
+    case ScanMode::IncreasedBy: return "Increased by";
+    case ScanMode::DecreasedBy: return "Decreased by";
+    case ScanMode::SameAsFirst: return "Same as first scan";
     }
     return "Unknown";
+}
+
+std::vector<ScanMode> scanModes() {
+    return {
+        ScanMode::Exact,        ScanMode::UnknownInitial, ScanMode::Changed,     ScanMode::Unchanged,
+        ScanMode::Increased,    ScanMode::Decreased,      ScanMode::ValueBetween, ScanMode::BiggerThan,
+        ScanMode::SmallerThan,  ScanMode::IncreasedBy,    ScanMode::DecreasedBy, ScanMode::SameAsFirst
+    };
+}
+
+bool modeUsesSecondValue(ScanMode mode) {
+    return mode == ScanMode::ValueBetween;
+}
+
+bool modeUsesValue(ScanMode mode) {
+    switch (mode) {
+    case ScanMode::Exact:
+    case ScanMode::ValueBetween:
+    case ScanMode::BiggerThan:
+    case ScanMode::SmallerThan:
+    case ScanMode::IncreasedBy:
+    case ScanMode::DecreasedBy:
+        return true;
+    case ScanMode::UnknownInitial:
+    case ScanMode::Changed:
+    case ScanMode::Unchanged:
+    case ScanMode::Increased:
+    case ScanMode::Decreased:
+    case ScanMode::SameAsFirst:
+        return false;
+    }
+    return false;
 }
 
 bool isHardware(BreakpointKind kind) {
@@ -102,6 +149,52 @@ bool isValidWatchLength(std::uint8_t length) {
     return length == 1 || length == 2 || length == 4 || length == 8;
 }
 
+namespace {
+
+// Index order is shared by all three register helpers below, so the UI can loop
+// over registerCount() and pair each name with its value without a switch of
+// its own. The first nine entries line up between the two lists on purpose:
+// rip/eip, rsp/esp and so on occupy the same index in both.
+constexpr const char* registerNames64[] = {"RIP", "RSP", "RBP", "RAX", "RBX", "RCX", "RDX", "RSI", "RDI",
+                                           "R8",  "R9",  "R10", "R11", "R12", "R13", "R14", "R15"};
+constexpr const char* registerNames32[] = {"EIP", "ESP", "EBP", "EAX", "EBX", "ECX", "EDX", "ESI", "EDI"};
+
+} // namespace
+
+const char* registerName(Bitness bitness, std::size_t index) {
+    if (bitness == Bitness::X86) {
+        return index < std::size(registerNames32) ? registerNames32[index] : "";
+    }
+    return index < std::size(registerNames64) ? registerNames64[index] : "";
+}
+
+std::size_t registerCount(Bitness bitness) {
+    return bitness == Bitness::X86 ? std::size(registerNames32) : std::size(registerNames64);
+}
+
+std::uint64_t registerValue(const RegisterContext& context, std::size_t index) {
+    switch (index) {
+    case 0: return context.rip;
+    case 1: return context.rsp;
+    case 2: return context.rbp;
+    case 3: return context.rax;
+    case 4: return context.rbx;
+    case 5: return context.rcx;
+    case 6: return context.rdx;
+    case 7: return context.rsi;
+    case 8: return context.rdi;
+    case 9: return context.r8;
+    case 10: return context.r9;
+    case 11: return context.r10;
+    case 12: return context.r11;
+    case 13: return context.r12;
+    case 14: return context.r13;
+    case 15: return context.r14;
+    case 16: return context.r15;
+    default: return 0;
+    }
+}
+
 std::optional<ValueType> parseValueType(const std::string& text) {
     const auto value = lower(text);
     for (const auto type : valueTypes()) {
@@ -116,7 +209,8 @@ std::vector<ValueType> valueTypes() {
     return {
         ValueType::Int8, ValueType::UInt8, ValueType::Int16, ValueType::UInt16,
         ValueType::Int32, ValueType::UInt32, ValueType::Int64, ValueType::UInt64,
-        ValueType::Float, ValueType::Double, ValueType::Bytes
+        ValueType::Float, ValueType::Double, ValueType::Bytes,
+        ValueType::StringAscii, ValueType::StringUtf16
     };
 }
 
@@ -256,6 +350,20 @@ std::optional<ScanValue> parseScanValue(ValueType type, const std::string& text)
             value.mask = std::move(pattern->mask);
             break;
         }
+        case ValueType::StringAscii:
+            // No terminator. A string in a game's memory is very often a fixed
+            // buffer with junk after the text, so searching for the NUL would
+            // miss most of them.
+            value.bytes.assign(text.begin(), text.end());
+            break;
+        case ValueType::StringUtf16: {
+            const auto wide = widen(text);
+            value.bytes.resize(wide.size() * sizeof(wchar_t));
+            if (!wide.empty()) {
+                std::memcpy(value.bytes.data(), wide.data(), value.bytes.size());
+            }
+            break;
+        }
         }
         if (value.bytes.empty()) {
             return std::nullopt;
@@ -279,7 +387,29 @@ std::string formatValue(ValueType type, const std::vector<std::uint8_t>& bytes) 
     case ValueType::UInt64: if (auto v = readValue<std::uint64_t>(bytes)) out << *v; break;
     case ValueType::Float: if (auto v = readValue<float>(bytes)) out << *v; break;
     case ValueType::Double: if (auto v = readValue<double>(bytes)) out << *v; break;
-    case ValueType::Bytes: return bytesToHex(bytes); 
+    case ValueType::Bytes: return bytesToHex(bytes);
+    case ValueType::StringAscii: {
+        std::string text;
+        text.reserve(bytes.size());
+        for (const auto byte : bytes) {
+            // Anything unprintable becomes a dot rather than being emitted
+            // raw: a stray 0x07 in a table cell rings the terminal bell and a
+            // stray 0x0A wraps the row.
+            text.push_back(std::isprint(byte) != 0 ? static_cast<char>(byte) : '.');
+        }
+        return text;
+    }
+    case ValueType::StringUtf16: {
+        std::wstring wide(bytes.size() / sizeof(wchar_t), L'\0');
+        if (!wide.empty()) {
+            std::memcpy(wide.data(), bytes.data(), wide.size() * sizeof(wchar_t));
+        }
+        auto text = narrow(wide);
+        std::replace_if(
+            text.begin(), text.end(),
+            [](char c) { return static_cast<unsigned char>(c) < 0x20; }, '.');
+        return text;
+    }
     }
     return out.str();
 }

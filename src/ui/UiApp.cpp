@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 
@@ -38,9 +39,15 @@ UiApp::UiApp(HINSTANCE instance, int showCommand)
         "    -- ctx.address, ctx.value, ctx.bytes, ctx.hex, ctx.type\n"
         "    return ctx.value ~= nil and ctx.value > 1000\n"
         "end\n");
+    // Registered here rather than in run(), so a script submitted before the
+    // first frame still finds a window to talk to.
+    services::setUiCommands(this);
 }
 
 UiApp::~UiApp() {
+    // Before anything is torn down: a script thread blocked on a request must
+    // not find a half-destroyed window on the other end of it.
+    services::setUiCommands(nullptr);
     // run() can bail before ImGui is initialised (window or D3D creation
     // failure); shutting the backends down in that case is undefined behaviour.
     if (imguiInitialized_) {
@@ -104,6 +111,31 @@ int UiApp::run() {
             continue;
         }
         render();
+
+        // --script, submitted after the first frame rather than before it: the
+        // script's very first act is usually to size the window and reset the
+        // layout, and neither means anything until there is something to size.
+        if (!startupScript_.empty() && !startupScriptSubmitted_) {
+            startupScriptSubmitted_ = true;
+            std::ifstream file(startupScript_, std::ios::binary);
+            if (!file) {
+                notifyError("Could not read the script " + startupScript_.string() + ".");
+            } else {
+                std::ostringstream contents;
+                contents << file.rdbuf();
+                infra::Logger::instance().info("Running " + startupScript_.string() + ".");
+                if (!lua_.submit(contents.str())) {
+                    notifyError("A script is already running.");
+                }
+            }
+        }
+
+        // quit() from a script. Posted rather than acted on directly so the
+        // frame finishes and the usual autosave path runs.
+        if (quitRequested_) {
+            quitRequested_ = false;
+            PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+        }
     }
 
     // Autosave so the address list survives a normal exit even when the user
@@ -287,6 +319,10 @@ void UiApp::render() {
         }
     }
 
+    // Before the frame is built, so that a script opening a panel affects the
+    // frame about to be drawn rather than the one after it.
+    drainAutomation();
+
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -319,6 +355,12 @@ void UiApp::render() {
     if (showMemoryViewer_)   { renderMemoryPanel(); }
     if (showDisassembly_)    { renderDisassemblyPanel(); }
     if (showBreakpoints_)    { renderBreakpointPanel(); }
+    if (showAccessWatch_)    { renderAccessWatchPanel(); }
+    if (showPatches_)        { renderPatchesPanel(); }
+    if (showSymbols_)        { renderSymbolsPanel(); }
+    if (showScripts_)        { renderScriptsPanel(); }
+    if (showStructures_)     { renderStructuresPanel(); }
+    if (showSpeed_)          { renderSpeedPanel(); }
     if (showModules_)        { renderModulesPanel(); }
     if (showMemoryRegions_)  { renderRegionsPanel(); }
     if (showLogs_)           { renderLogPanel(); }
@@ -334,6 +376,13 @@ void UiApp::render() {
     renderConfirmModal();
     renderToasts();
 
+    // Focus has to be asked for between NewFrame and Render, so a select_panel
+    // handled at the top of this frame lands here.
+    if (!focusPanel_.empty()) {
+        ImGui::SetWindowFocus(focusPanel_.c_str());
+        focusPanel_.clear();
+    }
+
     ImGui::Render();
     const float clearColor[4] = {0.06f, 0.07f, 0.08f, 1.0f};
     deviceContext_->OMSetRenderTargets(1, &renderTargetView_, nullptr);
@@ -345,6 +394,10 @@ void UiApp::render() {
         ImGui::UpdatePlatformWindows();
         ImGui::RenderPlatformWindowsDefault();
     }
+
+    // Last thing before the present, because the swap chain discards on present
+    // and after it there is nothing left in the back buffer to capture.
+    drainScreenshots();
 
     const HRESULT presented = swapChain_->Present(1, 0);
     if (presented == DXGI_ERROR_DEVICE_REMOVED || presented == DXGI_ERROR_DEVICE_RESET) {
@@ -366,22 +419,78 @@ void UiApp::render() {
 }
 void UiApp::requestDetach() {
     const auto liveBreakpoints = services_.breakpoints().breakpoints().size();
-    auto detach = [this] {
+    const auto allPatches = services_.patches().patches();
+    const auto appliedPatches = std::count_if(allPatches.begin(), allPatches.end(),
+                                              [](const engine_patch::Patch& p) { return p.enabled; });
+
+    const auto allScripts = services_.autoAssembler().scripts();
+    const auto liveScripts = std::count_if(allScripts.begin(), allScripts.end(),
+                                           [](const engine_aa::Script& s) { return s.enabled; });
+
+    auto detach = [this, appliedPatches, liveScripts] {
+        // Scripts are switched off first, unlike patches, and the asymmetry is
+        // deliberate. A patch is one run of bytes with one undo record, so
+        // leaving it applied is a coherent state. A script's changes are a set
+        // of patches plus memory it allocated plus symbols it published, and
+        // only the script knows how to take them apart. Once the handle closes
+        // nothing can, so that is not "the cheat stays on" -- it is a leak with
+        // no owner.
+        if (liveScripts > 0) {
+            if (auto disabled = services_.autoAssembler().disableAll(); !disabled) {
+                notifyError(disabled.error());
+            }
+        }
+        // The clocks go back for the same reason a script does: what the
+        // payload changed is a set of import entries only it knows about, and
+        // after this nothing is left that could put them back.
+        if (auto reset = services_.speed().reset(); !reset) {
+            notifyError(reset.error());
+        }
+        services_.speed().forget();
         services_.breakpoints().detachDebugger();
+        // Deliberately not restored: a patch someone left applied may be the
+        // whole point of the session. What is not optional is saying so, since
+        // after this the originals are gone and the target keeps running.
+        services_.patches().forgetAll();
         services_.session().detach();
-        notifyInfo("Detached from the target process.");
+        if (appliedPatches > 0) {
+            notifyInfo("Detached. " + std::to_string(appliedPatches) +
+                       " patch(es) are still applied in the target and can no longer be undone from here.");
+        } else {
+            notifyInfo("Detached from the target process.");
+        }
     };
 
-    if (liveBreakpoints == 0) {
+    std::string warning;
+    if (liveBreakpoints != 0) {
+        warning += std::to_string(liveBreakpoints) +
+                   " breakpoint(s) are still set. Detaching removes them and restores the original "
+                   "instruction bytes. If any byte cannot be restored the target will be left with a 0xCC "
+                   "trap and will most likely crash.";
+    }
+    if (appliedPatches != 0) {
+        if (!warning.empty()) {
+            warning += "\n\n";
+        }
+        warning += std::to_string(appliedPatches) +
+                   " patch(es) are still applied. Those are left in place -- the target keeps running with "
+                   "them -- but the original bytes are forgotten, so this is the last chance to put them "
+                   "back. Cancel and use Restore all in the Patches panel if you want the original code.";
+    }
+    if (liveScripts != 0) {
+        if (!warning.empty()) {
+            warning += "\n\n";
+        }
+        warning += std::to_string(liveScripts) +
+                   " script(s) are on. Those are switched off and everything they changed is put back, "
+                   "because after detaching nothing is left that knows how to undo them.";
+    }
+
+    if (warning.empty()) {
         detach();
         return;
     }
-    confirmAction(
-        "Detach with active breakpoints?",
-        std::to_string(liveBreakpoints) + " breakpoint(s) are still set. Detaching removes them and "
-        "restores the original instruction bytes. If any byte cannot be restored the target will be "
-        "left with a 0xCC trap and will most likely crash.",
-        "Detach", detach);
+    confirmAction("Detach from the target?", warning, "Detach", detach);
 }
 
 void UiApp::notifyInfo(const std::string& text) {

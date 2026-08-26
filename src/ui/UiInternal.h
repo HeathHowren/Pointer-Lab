@@ -28,8 +28,21 @@
 
 namespace ire::ui {
 
-inline constexpr const char* scanModeNames[] = {"Exact",     "Unknown initial", "Changed",
-                                                "Unchanged", "Increased",       "Decreased"};
+inline std::vector<const char*> scanModeNames() {
+    std::vector<const char*> names;
+    for (const auto mode : domain::scanModes()) {
+        names.push_back(domain::scanModeName(mode));
+    }
+    return names;
+}
+
+inline domain::ScanMode scanModeFromIndex(int index) {
+    const auto modes = domain::scanModes();
+    if (index < 0 || static_cast<std::size_t>(index) >= modes.size()) {
+        return domain::ScanMode::Exact;
+    }
+    return modes[static_cast<std::size_t>(index)];
+}
 
 inline constexpr ImGuiTableFlags denseTableFlags =
     ImGuiTableFlags_BordersInnerV |
@@ -39,17 +52,6 @@ inline constexpr ImGuiTableFlags denseTableFlags =
     ImGuiTableFlags_Reorderable |
     ImGuiTableFlags_Hideable |
     ImGuiTableFlags_SizingStretchProp;
-
-inline domain::ScanMode scanModeFromIndex(int index) {
-    switch (index) {
-    case 1: return domain::ScanMode::UnknownInitial;
-    case 2: return domain::ScanMode::Changed;
-    case 3: return domain::ScanMode::Unchanged;
-    case 4: return domain::ScanMode::Increased;
-    case 5: return domain::ScanMode::Decreased;
-    default: return domain::ScanMode::Exact;
-    }
-}
 
 inline const char* valueTypeDisplayName(domain::ValueType type) {
     switch (type) {
@@ -64,8 +66,18 @@ inline const char* valueTypeDisplayName(domain::ValueType type) {
     case domain::ValueType::Float:  return "f32 (float)";
     case domain::ValueType::Double: return "f64 (double)";
     case domain::ValueType::Bytes:  return "bytes (byte array)";
+    case domain::ValueType::StringAscii:  return "str (text)";
+    case domain::ValueType::StringUtf16:  return "wstr (text, 2 bytes/char)";
     }
     return "unknown";
+}
+
+// Green for an address inside a loaded module, because such an address is at
+// the same module+offset every run. This is the single most useful thing the
+// results table can say about a row: it is the difference between an address
+// worth writing down and one that is wherever the allocator put it today.
+inline ImVec4 staticAddressColor() {
+    return ImVec4(0.47f, 0.78f, 0.55f, 1.0f);
 }
 
 inline std::vector<const char*> valueTypeNames() {

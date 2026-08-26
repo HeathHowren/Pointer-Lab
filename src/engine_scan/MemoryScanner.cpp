@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <numeric>
+#include <type_traits>
 
 namespace ire::engine_scan {
 
@@ -23,58 +24,130 @@ T unpack(const std::vector<std::uint8_t>& bytes) {
     return value;
 }
 
-bool numericCompare(domain::ScanMode mode, domain::ValueType type, const std::vector<std::uint8_t>& current, const std::vector<std::uint8_t>& previous) {
+// Calls `visit` with a value-initialised object of the C++ type that `type`
+// names, so each comparison below is written once rather than once per type.
+// The variable-length types have no arithmetic and answer false; every mode
+// that reaches here has already been rejected for them by modeSupportsType.
+template <typename Visitor>
+bool visitNumeric(domain::ValueType type, Visitor&& visit) {
     switch (type) {
-    case domain::ValueType::Int8: {
-        auto c = unpack<std::int8_t>(current); auto p = unpack<std::int8_t>(previous);
-        return mode == domain::ScanMode::Increased ? c > p : c < p;
-    }
-    case domain::ValueType::UInt8: {
-        auto c = unpack<std::uint8_t>(current); auto p = unpack<std::uint8_t>(previous);
-        return mode == domain::ScanMode::Increased ? c > p : c < p;
-    }
-    case domain::ValueType::Int16: {
-        auto c = unpack<std::int16_t>(current); auto p = unpack<std::int16_t>(previous);
-        return mode == domain::ScanMode::Increased ? c > p : c < p;
-    }
-    case domain::ValueType::UInt16: {
-        auto c = unpack<std::uint16_t>(current); auto p = unpack<std::uint16_t>(previous);
-        return mode == domain::ScanMode::Increased ? c > p : c < p;
-    }
-    case domain::ValueType::Int32: {
-        auto c = unpack<std::int32_t>(current); auto p = unpack<std::int32_t>(previous);
-        return mode == domain::ScanMode::Increased ? c > p : c < p;
-    }
-    case domain::ValueType::UInt32: {
-        auto c = unpack<std::uint32_t>(current); auto p = unpack<std::uint32_t>(previous);
-        return mode == domain::ScanMode::Increased ? c > p : c < p;
-    }
-    case domain::ValueType::Int64: {
-        auto c = unpack<std::int64_t>(current); auto p = unpack<std::int64_t>(previous);
-        return mode == domain::ScanMode::Increased ? c > p : c < p;
-    }
-    case domain::ValueType::UInt64: {
-        auto c = unpack<std::uint64_t>(current); auto p = unpack<std::uint64_t>(previous);
-        return mode == domain::ScanMode::Increased ? c > p : c < p;
-    }
-    case domain::ValueType::Float: {
-        auto c = unpack<float>(current); auto p = unpack<float>(previous);
-        return mode == domain::ScanMode::Increased ? c > p : c < p;
-    }
-    case domain::ValueType::Double: {
-        auto c = unpack<double>(current); auto p = unpack<double>(previous);
-        return mode == domain::ScanMode::Increased ? c > p : c < p;
-    }
+    case domain::ValueType::Int8: return visit(std::int8_t{});
+    case domain::ValueType::UInt8: return visit(std::uint8_t{});
+    case domain::ValueType::Int16: return visit(std::int16_t{});
+    case domain::ValueType::UInt16: return visit(std::uint16_t{});
+    case domain::ValueType::Int32: return visit(std::int32_t{});
+    case domain::ValueType::UInt32: return visit(std::uint32_t{});
+    case domain::ValueType::Int64: return visit(std::int64_t{});
+    case domain::ValueType::UInt64: return visit(std::uint64_t{});
+    case domain::ValueType::Float: return visit(float{});
+    case domain::ValueType::Double: return visit(double{});
     case domain::ValueType::Bytes:
+    case domain::ValueType::StringAscii:
+    case domain::ValueType::StringUtf16:
         return false;
     }
     return false;
 }
 
-// Exact match against a raw buffer. Honours wildcard masks for byte patterns
-// and an epsilon for floating point, and never allocates.
+// Increased / Decreased / Increased by / Decreased by: everything that needs
+// the previous value as well as the current one.
+bool relativeCompare(domain::ScanMode mode, domain::ValueType type, const std::vector<std::uint8_t>& current,
+                     const std::vector<std::uint8_t>& previous, const std::vector<std::uint8_t>& delta,
+                     double epsilon) {
+    return visitNumeric(type, [&](auto tag) {
+        using T = decltype(tag);
+        const auto c = unpack<T>(current);
+        const auto p = unpack<T>(previous);
+        switch (mode) {
+        case domain::ScanMode::Increased: return c > p;
+        case domain::ScanMode::Decreased: return c < p;
+        case domain::ScanMode::IncreasedBy:
+        case domain::ScanMode::DecreasedBy: {
+            const auto d = unpack<T>(delta);
+            // Wrapping is deliberate for the integer types: a health value
+            // stored as u8 that goes from 3 to 253 really did decrease by 6.
+            const auto expected =
+                mode == domain::ScanMode::IncreasedBy ? static_cast<T>(p + d) : static_cast<T>(p - d);
+            if constexpr (std::is_floating_point_v<T>) {
+                // Exact equality would find nothing: the stored value is the
+                // result of arithmetic that rarely lands on the typed decimal.
+                return std::fabs(static_cast<double>(c) - static_cast<double>(expected)) <= epsilon;
+            } else {
+                return c == expected;
+            }
+        }
+        default: return false;
+        }
+    });
+}
+
+// Bigger than / Smaller than / Value between: filters that test the value as it
+// stands, so they need no previous scan.
+bool absoluteCompare(domain::ScanMode mode, domain::ValueType type, const std::uint8_t* candidate,
+                     std::size_t available, const std::vector<std::uint8_t>& low,
+                     const std::vector<std::uint8_t>& high) {
+    return visitNumeric(type, [&](auto tag) {
+        using T = decltype(tag);
+        if (available < sizeof(T)) {
+            return false;
+        }
+        T c{};
+        std::memcpy(&c, candidate, sizeof(T));
+        const auto a = unpack<T>(low);
+        switch (mode) {
+        case domain::ScanMode::BiggerThan: return c > a;
+        case domain::ScanMode::SmallerThan: return c < a;
+        case domain::ScanMode::ValueBetween: {
+            const auto b = unpack<T>(high);
+            // Ordered here rather than rejected, because "between 200 and 100"
+            // is a typo with an obvious meaning and no other one.
+            return c >= std::min(a, b) && c <= std::max(a, b);
+        }
+        default: return false;
+        }
+    });
+}
+
+// ASCII case folding only, and deliberately so. Folding the rest correctly
+// needs the Unicode case tables and a locale, and a scanner that folded some
+// characters and not others without saying which would be worse than one that
+// is clear about its limit.
+std::uint8_t foldAscii(std::uint8_t byte) {
+    return byte >= 'A' && byte <= 'Z' ? static_cast<std::uint8_t>(byte - 'A' + 'a') : byte;
+}
+
+bool stringMatches(const std::uint8_t* candidate, const std::vector<std::uint8_t>& expected,
+                   domain::ValueType type, bool caseInsensitive) {
+    if (!caseInsensitive) {
+        return std::memcmp(candidate, expected.data(), expected.size()) == 0;
+    }
+    if (type == domain::ValueType::StringUtf16) {
+        // Fold the low byte of each code unit and require the high byte to
+        // match exactly: that is the ASCII range of UTF-16 and nothing else.
+        for (std::size_t i = 0; i + 1 < expected.size(); i += 2) {
+            if (candidate[i + 1] != expected[i + 1] || foldAscii(candidate[i]) != foldAscii(expected[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        if (foldAscii(candidate[i]) != foldAscii(expected[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Exact match against a raw buffer. Honours wildcard masks for byte patterns,
+// an epsilon for floating point and case folding for strings, and never
+// allocates.
 bool matchesExact(const std::uint8_t* candidate, const std::vector<std::uint8_t>& expected,
-                  const std::vector<std::uint8_t>& mask, domain::ValueType type, double epsilon) {
+                  const std::vector<std::uint8_t>& mask, domain::ValueType type, double epsilon,
+                  bool caseInsensitive = false) {
+    if (domain::isStringType(type)) {
+        return stringMatches(candidate, expected, type, caseInsensitive);
+    }
     if (epsilon > 0.0 && type == domain::ValueType::Float && expected.size() == sizeof(float)) {
         float c{};
         float e{};
@@ -98,6 +171,16 @@ bool matchesExact(const std::uint8_t* candidate, const std::vector<std::uint8_t>
         return true;
     }
     return std::memcmp(candidate, expected.data(), expected.size()) == 0;
+}
+
+// What a first scan can filter on: everything that tests the candidate as it
+// stands. The modes that need a previous value capture a baseline instead.
+bool firstScanMatches(domain::ScanMode mode, const domain::ScanValue& value, const std::uint8_t* candidate,
+                      std::size_t available, double epsilon) {
+    if (mode == domain::ScanMode::Exact) {
+        return matchesExact(candidate, value.bytes, value.mask, value.type, epsilon, value.caseInsensitive);
+    }
+    return absoluteCompare(mode, value.type, candidate, available, value.bytes, value.bytes2);
 }
 
 bool eligibleRegion(const domain::MemoryRegion& region, const ScanOptions& options) {
@@ -244,11 +327,13 @@ void ScanJob::scanFirst(domain::ScanMode mode, domain::ScanValue value) {
                 const std::uint8_t* candidate = buffer.data() + i;
                 bool matched = snapshot;
                 if (!matched) {
-                    matched = matchesExact(candidate, value.bytes, value.mask, value.type, options_.floatEpsilon);
+                    matched = firstScanMatches(mode, value, candidate, buffer.size() - i, options_.floatEpsilon);
                 }
                 if (matched) {
                     std::vector<std::uint8_t> current(candidate, candidate + valueSize);
-                    batch.push_back({region.base + offset + i, current, current});
+                    // previous, current and first are all the same on a first
+                    // scan: this is the only value anyone has seen here yet.
+                    batch.push_back({region.base + offset + i, current, current, current});
                 }
             }
 
@@ -301,14 +386,26 @@ void ScanJob::scanNext(domain::ScanMode mode, domain::ScanValue value, std::vect
     const std::size_t valueSize = value.bytes.size();
 
     for (std::size_t i = 0; i < previous.size() && !cancel_; ++i) {
-        auto current = session_.readBytes(previous[i].address, valueSize);
-        fraction_ = static_cast<double>(i + 1) / static_cast<double>(total);
-        if (!current || current.value().size() != valueSize) {
+        const auto& oldBytes = previous[i].current.empty() ? previous[i].previous : previous[i].current;
+        // A mode that compares against an earlier scan carries no value, and a
+        // string or byte pattern has no width of its own, so the width comes
+        // from what this result already matched. Reading a fixed 0 bytes here
+        // made every string rescan return nothing.
+        const std::size_t width = valueSize != 0 ? valueSize : oldBytes.size();
+        if (width == 0) {
             continue;
         }
-        const auto& oldBytes = previous[i].current.empty() ? previous[i].previous : previous[i].current;
-        if (compareValues(mode, value.type, current.value(), oldBytes, value.bytes, value.mask, options_.floatEpsilon)) {
-            next.push_back({previous[i].address, oldBytes, current.value()});
+        auto current = session_.readBytes(previous[i].address, width);
+        fraction_ = static_cast<double>(i + 1) / static_cast<double>(total);
+        if (!current || current.value().size() != width) {
+            continue;
+        }
+        // A table saved by an older build has no first-scan value; treating the
+        // previous one as the first is the only honest fallback, and it makes
+        // "same as first scan" behave as "unchanged" rather than as nothing.
+        const auto& firstBytes = previous[i].first.empty() ? oldBytes : previous[i].first;
+        if (compareValues(mode, value, current.value(), oldBytes, firstBytes, options_.floatEpsilon)) {
+            next.push_back({previous[i].address, oldBytes, current.value(), firstBytes});
         }
         if (next.size() >= options_.maxResults) {
             break;
@@ -341,10 +438,110 @@ bool modeNeedsBaseline(domain::ScanMode mode) {
     case domain::ScanMode::Unchanged:
     case domain::ScanMode::Increased:
     case domain::ScanMode::Decreased:
+    case domain::ScanMode::IncreasedBy:
+    case domain::ScanMode::DecreasedBy:
+    case domain::ScanMode::SameAsFirst:
         return true;
     case domain::ScanMode::Exact:
     case domain::ScanMode::UnknownInitial:
+    case domain::ScanMode::ValueBetween:
+    case domain::ScanMode::BiggerThan:
+    case domain::ScanMode::SmallerThan:
         return false;
+    }
+    return false;
+}
+
+bool modeIsAbsolute(domain::ScanMode mode) {
+    switch (mode) {
+    case domain::ScanMode::Exact:
+    case domain::ScanMode::ValueBetween:
+    case domain::ScanMode::BiggerThan:
+    case domain::ScanMode::SmallerThan:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool modeSupportsType(domain::ScanMode mode, domain::ValueType type) {
+    if (type != domain::ValueType::Bytes && !domain::isStringType(type)) {
+        return true;
+    }
+    switch (mode) {
+    case domain::ScanMode::Exact:
+    case domain::ScanMode::Changed:
+    case domain::ScanMode::Unchanged:
+    case domain::ScanMode::SameAsFirst:
+        // The last three work only as a Next scan, and legitimately so: they
+        // take their width from the results an Exact scan already found.
+        return true;
+    default:
+        // Increased, Value between, Increased by and the rest all order values,
+        // and "bigger than" has no meaning for a name or a byte pattern.
+        // Unknown initial is excluded for a different reason: a baseline sweep
+        // needs a width, and these types have none until a value is typed.
+        return false;
+    }
+}
+
+std::vector<std::uintptr_t> findPattern(const domain::TargetSession& session, std::uintptr_t start,
+                                        std::size_t size, const domain::HexPattern& pattern,
+                                        std::size_t maxResults) {
+    std::vector<std::uintptr_t> matches;
+    if (pattern.bytes.empty() || size < pattern.bytes.size() || !session.attached()) {
+        return matches;
+    }
+
+    const std::size_t needle = pattern.bytes.size();
+    for (std::size_t offset = 0; offset + needle <= size && matches.size() < maxResults; offset += chunkSize) {
+        const std::size_t span = std::min(chunkSize, size - offset);
+        // Read past the chunk so a match straddling the boundary is still
+        // found, but only emit matches starting inside it -- otherwise every
+        // boundary produces the same match twice.
+        const std::size_t readSize = std::min(span + needle - 1, size - offset);
+        auto bytes = session.readBytes(start + offset, readSize);
+        if (!bytes || bytes.value().size() < needle) {
+            continue;
+        }
+        const auto& buffer = bytes.value();
+        const std::size_t limit = std::min(span, buffer.size() - needle + 1);
+        for (std::size_t i = 0; i < limit && matches.size() < maxResults; ++i) {
+            if (matchesExact(buffer.data() + i, pattern.bytes, pattern.mask, domain::ValueType::Bytes, 0.0)) {
+                matches.push_back(start + offset + i);
+            }
+        }
+    }
+    return matches;
+}
+
+bool compareValues(domain::ScanMode mode, const domain::ScanValue& value,
+                   const std::vector<std::uint8_t>& current, const std::vector<std::uint8_t>& previous,
+                   const std::vector<std::uint8_t>& first, double floatEpsilon) {
+    switch (mode) {
+    case domain::ScanMode::Exact:
+        if (current.size() < value.bytes.size() || value.bytes.empty()) {
+            return false;
+        }
+        return matchesExact(current.data(), value.bytes, value.mask, value.type, floatEpsilon,
+                            value.caseInsensitive);
+    case domain::ScanMode::ValueBetween:
+    case domain::ScanMode::BiggerThan:
+    case domain::ScanMode::SmallerThan:
+        return absoluteCompare(mode, value.type, current.data(), current.size(), value.bytes, value.bytes2);
+    case domain::ScanMode::Changed:
+        return current != previous;
+    case domain::ScanMode::Unchanged:
+        return current == previous;
+    case domain::ScanMode::SameAsFirst:
+        return current == first;
+    case domain::ScanMode::Increased:
+    case domain::ScanMode::Decreased:
+    case domain::ScanMode::IncreasedBy:
+    case domain::ScanMode::DecreasedBy:
+        return relativeCompare(mode, value.type, current, previous, value.bytes, floatEpsilon);
+    case domain::ScanMode::UnknownInitial:
+        return true;
     }
     return false;
 }
@@ -352,23 +549,13 @@ bool modeNeedsBaseline(domain::ScanMode mode) {
 bool compareValues(domain::ScanMode mode, domain::ValueType type, const std::vector<std::uint8_t>& current,
                    const std::vector<std::uint8_t>& previous, const std::vector<std::uint8_t>& exact,
                    const std::vector<std::uint8_t>& mask, double floatEpsilon) {
-    switch (mode) {
-    case domain::ScanMode::Exact:
-        if (current.size() < exact.size() || exact.empty()) {
-            return false;
-        }
-        return matchesExact(current.data(), exact, mask, type, floatEpsilon);
-    case domain::ScanMode::Changed:
-        return current != previous;
-    case domain::ScanMode::Unchanged:
-        return current == previous;
-    case domain::ScanMode::Increased:
-    case domain::ScanMode::Decreased:
-        return numericCompare(mode, type, current, previous);
-    case domain::ScanMode::UnknownInitial:
-        return true;
-    }
-    return false;
+    domain::ScanValue value;
+    value.type = type;
+    value.bytes = exact;
+    value.mask = mask;
+    // No first-scan value to offer, so Same as first scan degrades to
+    // Unchanged. Callers that mean it use the ScanValue form.
+    return compareValues(mode, value, current, previous, previous, floatEpsilon);
 }
 
 } // namespace ire::engine_scan

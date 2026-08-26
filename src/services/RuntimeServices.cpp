@@ -167,7 +167,8 @@ void AddressListService::freezeLoop(std::stop_token token) {
     }
 }
 
-BreakpointService::BreakpointService(domain::TargetSession& session) : session_(session) {}
+BreakpointService::BreakpointService(domain::TargetSession& session, engine_debug::AccessWatch* watch)
+    : session_(session), watch_(watch) {}
 
 BreakpointService::~BreakpointService() {
     detachDebugger();
@@ -184,6 +185,13 @@ infra::Result<void> BreakpointService::attachDebugger() {
     return debugPump_.attach(
         session_.pid(),
         [this](const domain::BreakpointInfo& info) {
+            // Fed first, and unconditionally. The watch decides for itself
+            // whether it is running; the notification below is rate limited and
+            // must never be what determines whether a hit was counted.
+            if (watch_ != nullptr && info.lastHit.captured && info.address == watch_->watchedAddress()) {
+                watch_->record(info.lastHit);
+            }
+
             std::string message = "Breakpoint hit at " + domain::toHex(info.address);
             if (!info.label.empty()) {
                 message += " (" + info.label + ")";
@@ -265,6 +273,59 @@ RuntimeServices::RuntimeServices()
       luaScanJob_(session_),
       pointerScanJob_(session_),
       injector_(session_),
-      breakpoints_(session_) {}
+      accessWatch_(session_, disassembler_),
+      patches_(session_),
+      autoAssembler_(session_, assembler_, patches_, symbols_, injector_),
+      dissector_(session_, symbols_),
+      speed_(session_, injector_),
+      breakpoints_(session_, &accessWatch_) {}
+
+infra::Result<void> RuntimeServices::startAccessWatch(std::uintptr_t address, std::uint8_t length, bool writesOnly) {
+    if (!session_.attached()) {
+        return infra::Result<void>::fail("Attach to a process before watching an address.");
+    }
+    if (!domain::isValidWatchLength(length)) {
+        return infra::Result<void>::fail("A data breakpoint watches 1, 2, 4 or 8 bytes.");
+    }
+    // The processor requires a data breakpoint's address to be aligned to the
+    // width it watches. Reporting that is far more useful than letting
+    // SetThreadContext fail with a generic invalid-parameter error.
+    if (length > 1 && (address % length) != 0) {
+        return infra::Result<void>::fail("A " + std::to_string(length) + "-byte watch must be on a " +
+                                         std::to_string(length) + "-byte aligned address; " +
+                                         domain::toHex(address) + " is not.");
+    }
+
+    if (auto attached = breakpoints_.attachDebugger(); !attached) {
+        return attached;
+    }
+
+    const auto kind = writesOnly ? domain::BreakpointKind::HardwareWrite : domain::BreakpointKind::HardwareReadWrite;
+
+    // Started before the breakpoint is armed. Arming first would leave a window
+    // in which hits arrive with no watch to record them, and those are exactly
+    // the hits the user is waiting for.
+    accessWatch_.begin(address, length, kind);
+
+    const std::string label = std::string(writesOnly ? "writes to " : "accesses ") + domain::toHex(address);
+    if (auto added = breakpoints_.addBreakpoint(address, label, kind, length); !added) {
+        accessWatch_.stop();
+        return added;
+    }
+    return infra::Result<void>::ok();
+}
+
+void RuntimeServices::stopAccessWatch() {
+    const auto address = accessWatch_.watchedAddress();
+    // Stop recording first, so a hit already in flight cannot land after the
+    // breakpoint is gone and leave a site with nothing behind it.
+    accessWatch_.stop();
+    if (address != 0) {
+        if (auto removed = breakpoints_.removeBreakpoint(address); !removed) {
+            infra::Logger::instance().warn("Could not remove the access watch breakpoint at " +
+                                           domain::toHex(address) + ": " + removed.error());
+        }
+    }
+}
 
 } // namespace ire::services

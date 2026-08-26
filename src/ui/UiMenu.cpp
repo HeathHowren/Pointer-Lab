@@ -46,6 +46,9 @@ void UiApp::renderMenu() {
         if (ImGui::MenuItem("Memory Viewer"))  showMemoryViewer_  = true;
         if (ImGui::MenuItem("Disassembly"))   showDisassembly_   = true;
         if (ImGui::MenuItem("Breakpoints"))   showBreakpoints_   = true;
+        if (ImGui::MenuItem("Access Watch"))  showAccessWatch_   = true;
+        if (ImGui::MenuItem("Patches"))       showPatches_       = true;
+        if (ImGui::MenuItem("Symbols"))       showSymbols_       = true;
         if (ImGui::MenuItem("Modules"))       showModules_       = true;
         if (ImGui::MenuItem("Memory Regions")) showMemoryRegions_ = true;
         if (ImGui::MenuItem("Logs"))          showLogs_          = true;
@@ -55,6 +58,9 @@ void UiApp::renderMenu() {
         if (ImGui::MenuItem("Pointer Scanner")) showPointerScanner_ = true;
         if (ImGui::MenuItem("Lua Scanner"))    showLuaScanner_     = true;
         if (ImGui::MenuItem("Injection"))      showInjection_      = true;
+        if (ImGui::MenuItem("Scripts"))        showScripts_        = true;
+        if (ImGui::MenuItem("Structures"))     showStructures_     = true;
+        if (ImGui::MenuItem("Speed and Export")) showSpeed_       = true;
         if (ImGui::MenuItem("Lua Console"))    showLuaConsole_     = true;
         ImGui::EndMenu();
     }
@@ -122,6 +128,21 @@ void UiApp::renderCommandBar() {
     if (attached) {
         ImGui::SameLine();
         ImGui::TextDisabled("PID %u", services_.session().pid());
+
+        // Bitness is not a detail the user can afford to have to infer. It
+        // decides the pointer width a chain steps by, the mode the disassembler
+        // and assembler run in, and whether a DLL they built will load at all.
+        const auto bitness = services_.session().bitness();
+        ImGui::SameLine();
+        statusPill(bitness == domain::Bitness::X86 ? "32-BIT" : "64-BIT", colorFromBytes(63, 75, 88));
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(bitness == domain::Bitness::X86
+                                  ? "A 32-bit (WOW64) target. Pointers are 4 bytes, the disassembler and\n"
+                                    "assembler run in x86 mode, and a DLL injected here must be built x86."
+                                  : "A 64-bit target. Pointers are 8 bytes, and a DLL injected here must\n"
+                                    "be built x64.");
+        }
+
         if (services_.session().readOnly()) {
             // Otherwise limited access only shows up as every individual write
             // failing for no visible reason.

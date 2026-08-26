@@ -166,11 +166,31 @@ TEST_CASE("Resolution reports why a chain failed instead of guessing", "[pointer
         auto resolved = engine_pointer::resolveChain(fixture.session, chain);
         CHECK_FALSE(resolved.has_value());
     }
-    SECTION("a chain with no offsets is not a chain") {
+    SECTION("a chain with neither a module nor a base is not a chain") {
         domain::PointerChain chain;
-        chain.moduleName = L"pointerlab_test_helper.exe";
         CHECK_FALSE(chain.valid());
         CHECK_FALSE(engine_pointer::resolveChain(fixture.session, chain).has_value());
+    }
+    SECTION("a module-rooted chain with no offsets is the static address itself") {
+        // Manual entry produces these: "module+offset, no dereferencing" is how
+        // a static value is written down, and it survives a restart for the
+        // same reason a longer chain does.
+        domain::PointerChain chain;
+        chain.moduleName = L"pointerlab_test_helper.exe";
+        chain.moduleOffset = 0x10;
+        REQUIRE(chain.valid());
+        auto resolved = engine_pointer::resolveChain(fixture.session, chain);
+        REQUIRE(resolved.has_value());
+        CHECK(resolved.value() != 0);
+    }
+    SECTION("an absolute base resolves without a module, and does not survive a restart") {
+        domain::PointerChain chain;
+        chain.moduleOffset = fixture.helper.address();
+        REQUIRE(chain.valid());
+        CHECK_FALSE(chain.moduleRooted());
+        auto resolved = engine_pointer::resolveChain(fixture.session, chain);
+        REQUIRE(resolved.has_value());
+        CHECK(resolved.value() == fixture.helper.address());
     }
 }
 

@@ -3,6 +3,7 @@
 #include "domain/Domain.h"
 #include "domain/TargetSession.h"
 
+#include <optional>
 #include <vector>
 
 namespace ire::engine_disasm {
@@ -22,6 +23,29 @@ public:
                                                                  domain::TargetSession& session,
                                                                  std::uintptr_t address,
                                                                  std::vector<std::uint8_t> patch);
+
+// The instruction that ends exactly at `address`, if one can be identified.
+//
+// x86 cannot be disassembled backwards: instructions are 1 to 15 bytes long and
+// there is no way to know where the previous one began without already knowing.
+// This matters because a *data* breakpoint traps after the access completes, so
+// the reported instruction pointer names the instruction after the one that
+// touched the address -- and the one that touched it is the whole answer the
+// user asked for.
+//
+// The approach relies on x86 being self-synchronising: decoders started at
+// different offsets converge on the same boundaries within a few instructions.
+// So every start position from 24 bytes back is decoded independently, each one
+// votes for the instruction it finds ending at `address`, and the boundary with
+// the most votes wins. A coincidental alignment is reached by one or two start
+// positions; the real one is reached by most of them.
+//
+// Returns nullopt when nothing lands there at all, which is honest rather than
+// unhelpful: a confident wrong answer here sends the reader to patch the wrong
+// instruction.
+[[nodiscard]] std::optional<domain::Instruction> precedingInstruction(const Disassembler& disassembler,
+                                                                      domain::TargetSession& session,
+                                                                      std::uintptr_t address);
 
 } // namespace ire::engine_disasm
 

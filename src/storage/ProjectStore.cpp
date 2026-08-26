@@ -24,7 +24,11 @@ std::string formatOffsets(const std::vector<std::ptrdiff_t>& offsets) {
         if (i > 0) {
             out << ',';
         }
-        out << std::hex << offsets[i];
+        // The unsigned bit pattern, read back with the matching cast. A manually
+        // entered chain may step backwards through a structure, and streaming a
+        // negative signed value writes a minus sign that only round-trips
+        // through stoull's wrap-on-negate -- which works, but by accident.
+        out << std::hex << static_cast<std::uintptr_t>(offsets[i]);
     }
     return out.str();
 }
@@ -142,6 +146,32 @@ infra::Result<void> ProjectStore::save(const std::filesystem::path& path, const 
     out << "IRETABLE " << currentFormatVersion << "\n";
     out << "pid|" << table.lastPid << "\n";
     out << "process|" << escape(domain::narrow(table.lastProcessName)) << "\n";
+    // A new record rather than a format version bump. Unrecognised record types
+    // are ignored by every reader this format has ever had, so a 2.1.0 build
+    // loads this file and simply skips the line -- whereas "IRETABLE 4" would
+    // make it refuse the whole table.
+    out << "bitness|" << (table.lastBitness == domain::Bitness::X86 ? "x86" : "x64") << "\n";
+    // Same reasoning: a new record type, no version bump.
+    for (const auto& symbol : table.symbols) {
+        out << "symbol|" << escape(symbol.name) << '|' << escape(symbol.expression) << "\n";
+    }
+    // And again. A script's newlines survive because escape() turns them into
+    // \n, so the whole source is one line of the file however long it is.
+    for (const auto& script : table.scripts) {
+        out << "script|" << escape(script.name) << '|' << escape(script.source) << "\n";
+    }
+    // A structure is a header line followed by one line per field, in offset
+    // order. Fields could have been packed into the header, but a layout is the
+    // record in this file most likely to be read and edited by hand, and one
+    // field per line is what makes that bearable.
+    for (const auto& structure : table.structures) {
+        out << "struct|" << escape(structure.name) << "\n";
+        for (const auto& field : structure.fields) {
+            out << "field|" << std::hex << static_cast<std::uintptr_t>(field.offset) << std::dec << '|'
+                << domain::valueTypeName(field.type) << '|' << field.length << '|' << escape(field.name)
+                << "\n";
+        }
+    }
     for (const auto& entry : table.entries) {
         out << "entry|"
             << entry.id << '|'
@@ -216,6 +246,78 @@ infra::Result<ProjectTable> ProjectStore::load(const std::filesystem::path& path
             }
         } else if (parts[0] == "process" && parts.size() >= 2) {
             table.lastProcessName = domain::widen(parts[1]);
+        } else if (parts[0] == "bitness" && parts.size() >= 2) {
+            // Absent in files written before this record existed, which is why
+            // the default is x64 rather than an error: every such file was
+            // written by a build that could only attach to 64-bit targets.
+            if (parts[1] == "x86") {
+                table.lastBitness = domain::Bitness::X86;
+            } else if (parts[1] == "x64") {
+                table.lastBitness = domain::Bitness::X64;
+            } else {
+                infra::Logger::instance().warn("Unrecognised target bitness \"" + parts[1] + "\" on line " +
+                                               std::to_string(lineNumber) + "; assuming 64-bit.");
+                ++skipped;
+            }
+        } else if (parts[0] == "symbol" && parts.size() >= 3) {
+            if (parts[1].empty() || parts[2].empty()) {
+                infra::Logger::instance().warn("Incomplete symbol on line " + std::to_string(lineNumber) +
+                                               "; ignoring it.");
+                ++skipped;
+            } else {
+                table.symbols.push_back({parts[1], parts[2]});
+            }
+        } else if (parts[0] == "script" && parts.size() >= 3) {
+            // An empty source is kept: it is a script the user started and has
+            // not written yet, and losing it on save/load would be worse than
+            // carrying a blank one.
+            if (parts[1].empty() && parts[2].empty()) {
+                infra::Logger::instance().warn("Empty script on line " + std::to_string(lineNumber) +
+                                               "; ignoring it.");
+                ++skipped;
+            } else {
+                table.scripts.push_back({parts[1], parts[2]});
+            }
+        } else if (parts[0] == "struct" && parts.size() >= 2) {
+            domain::Structure structure;
+            structure.id = table.structures.size() + 1;
+            structure.name = parts[1].empty() ? "Structure " + std::to_string(structure.id) : parts[1];
+            table.structures.push_back(std::move(structure));
+        } else if (parts[0] == "field" && parts.size() >= 5) {
+            // Fields belong to the structure above them. A field with nothing
+            // above it is named rather than silently attached to whatever comes
+            // next, because a layout in the wrong structure is worse than a
+            // missing one.
+            if (table.structures.empty()) {
+                infra::Logger::instance().warn("Field on line " + std::to_string(lineNumber) +
+                                               " comes before any struct record; ignoring it.");
+                ++skipped;
+                continue;
+            }
+            const auto offset = parseUnsigned(parts[1], 16);
+            const auto type = domain::parseValueType(parts[2]);
+            const auto length = parseUnsigned(parts[3], 10);
+            if (!offset || !type || !length) {
+                infra::Logger::instance().warn("Unreadable field on line " + std::to_string(lineNumber) +
+                                               "; skipping it.");
+                ++skipped;
+                continue;
+            }
+            domain::StructureField field;
+            // Written as the unsigned bit pattern, like a chain offset, so a
+            // field above the start of the object round-trips exactly.
+            field.offset = static_cast<std::ptrdiff_t>(static_cast<std::uintptr_t>(*offset));
+            field.type = *type;
+            field.length = static_cast<std::size_t>(*length);
+            field.name = parts[4].empty() ? domain::defaultFieldName(field.offset) : parts[4];
+            if (field.size() == 0) {
+                infra::Logger::instance().warn("Field \"" + field.name + "\" on line " +
+                                               std::to_string(lineNumber) +
+                                               " has no width; skipping it.");
+                ++skipped;
+                continue;
+            }
+            table.structures.back().fields.push_back(std::move(field));
         } else if (parts[0] == "entry" && parts.size() >= 9) {
             const auto id = parseUnsigned(parts[1], 10);
             const auto address = parseUnsigned(parts[2], 16);
@@ -246,12 +348,15 @@ infra::Result<ProjectTable> ProjectStore::load(const std::filesystem::path& path
             entry.hotkey = parts[7];
             entry.frozenValue = domain::parseHexBytes(parts[8]);
 
-            // Pointer chain, present from version 3. An empty module name means
-            // this is a plain fixed address, which is what versions 1 and 2 had.
-            if (parts.size() >= 12 && !parts[9].empty()) {
+            // Pointer chain, present from version 3. All three fields empty --
+            // no module, a zero base and no offsets -- means a plain fixed
+            // address, which is what versions 1 and 2 had. A chain with no
+            // module name but a base is a manually entered one rooted at an
+            // absolute address; it is legal, and does not survive a restart.
+            if (parts.size() >= 12 && (!parts[9].empty() || parseUnsigned(parts[10], 16).value_or(0) != 0)) {
                 const auto moduleOffset = parseUnsigned(parts[10], 16);
                 const auto offsets = parseOffsets(parts[11]);
-                if (!moduleOffset || !offsets || offsets->empty()) {
+                if (!moduleOffset || !offsets) {
                     infra::Logger::instance().warn(
                         "Malformed pointer chain on line " + std::to_string(lineNumber) +
                         "; keeping the entry as a fixed address.");

@@ -12,6 +12,7 @@
 //   in   SET <int>    store a new value        -> out  OK <int>
 //   in   GET          read the current value   -> out  VAL <int>
 //   in   TICKS        read the tick counter    -> out  TICKCOUNT <n>
+//   in   TIME         read the two clocks      -> out  TIMEVAL <ms> <qpc>
 //   in   QUIT         exit cleanly
 
 #include <Windows.h>
@@ -89,6 +90,15 @@ int main() {
             std::printf("VAL %ld\n", static_cast<long>(*slot));
         } else if (std::strncmp(line, "TICKS", 5) == 0) {
             std::printf("TICKCOUNT %lld\n", g_ticks);
+        } else if (std::strncmp(line, "TIME", 4) == 0) {
+            // Both clocks the speed payload hooks, called the ordinary way so
+            // they go through this module's import table -- which is exactly
+            // what the payload redirects. A helper that resolved them with
+            // GetProcAddress would be testing the wrong thing.
+            LARGE_INTEGER counter{};
+            QueryPerformanceCounter(&counter);
+            std::printf("TIMEVAL %llu %lld\n", GetTickCount64(),
+                        static_cast<long long>(counter.QuadPart));
         } else if (std::strncmp(line, "QUIT", 4) == 0) {
             break;
         } else {

@@ -261,6 +261,70 @@ infra::Result<std::uintptr_t> Win32Platform::allocate(HANDLE process, std::size_
     return infra::Result<std::uintptr_t>::ok(reinterpret_cast<std::uintptr_t>(memory));
 }
 
+infra::Result<std::uintptr_t> Win32Platform::allocateNear(HANDLE process, std::size_t size, DWORD protection,
+                                                          std::uintptr_t hint) const {
+    using Address = infra::Result<std::uintptr_t>;
+    if (hint == 0) {
+        return allocate(process, size, protection);
+    }
+
+    SYSTEM_INFO info{};
+    GetSystemInfo(&info);
+    const std::uintptr_t granularity = info.dwAllocationGranularity != 0 ? info.dwAllocationGranularity : 0x10000;
+
+    // Just under 2 GB. The displacement is measured from the *end* of the jump
+    // and the block has to fit entirely within reach, so the margin is not
+    // pedantry -- a cave placed at exactly 2 GB is one byte too far.
+    constexpr std::uintptr_t reach = 0x7FF00000;
+    const std::uintptr_t low = hint > reach ? hint - reach : 0;
+    const std::uintptr_t high = hint > UINTPTR_MAX - reach ? UINTPTR_MAX : hint + reach;
+
+    const auto alignUp = [granularity](std::uintptr_t value) {
+        return (value + granularity - 1) & ~(granularity - 1);
+    };
+
+    // Walks free regions with VirtualQueryEx rather than probing every 64 KB
+    // slot: the search range holds 32,768 of them, and asking the kernel where
+    // the holes are costs one call per region instead of one per slot.
+    const auto search = [&](std::uintptr_t from, std::uintptr_t to) -> std::uintptr_t {
+        MEMORY_BASIC_INFORMATION region{};
+        for (std::uintptr_t address = alignUp(from); address < to;) {
+            if (VirtualQueryEx(process, reinterpret_cast<LPCVOID>(address), &region, sizeof(region)) !=
+                sizeof(region)) {
+                break;
+            }
+            const auto base = reinterpret_cast<std::uintptr_t>(region.BaseAddress);
+            const auto end = base + region.RegionSize;
+            if (region.State == MEM_FREE) {
+                for (auto candidate = alignUp(std::max(base, from));
+                     candidate + size <= end && candidate < to; candidate += granularity) {
+                    if (auto* memory = VirtualAllocEx(process, reinterpret_cast<LPVOID>(candidate), size,
+                                                      MEM_COMMIT | MEM_RESERVE, protection)) {
+                        return reinterpret_cast<std::uintptr_t>(memory);
+                    }
+                }
+            }
+            if (end <= address) {
+                break; // no forward progress; refuse to spin
+            }
+            address = end;
+        }
+        return 0;
+    };
+
+    // Above the hint first, then below. Either satisfies the jump; starting
+    // above keeps the walk in one direction, which is the direction
+    // VirtualQueryEx enumerates anyway.
+    if (const auto above = search(hint, high); above != 0) {
+        return Address::ok(above);
+    }
+    if (const auto below = search(low, hint); below != 0) {
+        return Address::ok(below);
+    }
+    return Address::fail("No free memory within 2 GB of " + domain::toHex(hint) +
+                         ", so a five-byte jump could not reach the allocation.");
+}
+
 infra::Result<void> Win32Platform::free(HANDLE process, std::uintptr_t address) const {
     if (!VirtualFreeEx(process, reinterpret_cast<LPVOID>(address), 0, MEM_RELEASE)) {
         return infra::Result<void>::fail(formatLastError());
@@ -296,24 +360,32 @@ infra::Result<std::uint32_t> Win32Platform::createRemoteThread(HANDLE process, s
     return infra::Result<std::uint32_t>::ok(exitCode);
 }
 
-infra::Result<std::uint32_t> Win32Platform::injectLoadLibraryW(HANDLE process, const std::wstring& dllPath) const {
+infra::Result<std::uint32_t> Win32Platform::injectLoadLibraryW(HANDLE process, const std::wstring& dllPath,
+                                                               std::uintptr_t loadLibraryAddress) const {
     if (dllPath.empty()) {
         return infra::Result<std::uint32_t>::fail("No DLL path was given.");
     }
-    // LoadLibraryW is resolved from this process's kernel32, which is only at
-    // the same address in a target of the same architecture.
-    if (isWow64(process)) {
-        return infra::Result<std::uint32_t>::fail(
-            "The target is a 32-bit (WOW64) process. This 64-bit build of Pointer Lab cannot inject into it.");
-    }
 
-    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
-    if (!kernel32) {
-        return infra::Result<std::uint32_t>::fail("Could not locate kernel32.dll.", GetLastError());
-    }
-    const auto loadLibrary = reinterpret_cast<std::uintptr_t>(GetProcAddress(kernel32, "LoadLibraryW"));
+    std::uintptr_t loadLibrary = loadLibraryAddress;
     if (loadLibrary == 0) {
-        return infra::Result<std::uint32_t>::fail("Could not resolve LoadLibraryW.", GetLastError());
+        // Falling back to our own kernel32 is only correct for a target of the
+        // same architecture and the same kernel32 base. The caller is expected
+        // to have resolved the address out of the target for anything else --
+        // this path exists so a same-bitness inject still works if that fails.
+        if (isWow64(process)) {
+            return infra::Result<std::uint32_t>::fail(
+                "The target is a 32-bit process and its LoadLibraryW address could not be resolved. "
+                "Injecting this process's own address would send the remote thread into unmapped memory.");
+        }
+
+        HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+        if (!kernel32) {
+            return infra::Result<std::uint32_t>::fail("Could not locate kernel32.dll.", GetLastError());
+        }
+        loadLibrary = reinterpret_cast<std::uintptr_t>(GetProcAddress(kernel32, "LoadLibraryW"));
+        if (loadLibrary == 0) {
+            return infra::Result<std::uint32_t>::fail("Could not resolve LoadLibraryW.", GetLastError());
+        }
     }
 
     const auto bytes = (dllPath.size() + 1) * sizeof(wchar_t);
@@ -468,28 +540,164 @@ std::vector<std::uint32_t> threadIdsOf(std::uint32_t pid) {
 // progress, rather than abandoning them with the trap flag still set.
 constexpr auto drainTimeout = std::chrono::seconds(2);
 
-void captureRegisters(const CONTEXT& context, std::uint32_t threadId, domain::RegisterContext& out) {
-    out.rip = context.Rip;
-    out.rsp = context.Rsp;
-    out.rbp = context.Rbp;
-    out.rax = context.Rax;
-    out.rbx = context.Rbx;
-    out.rcx = context.Rcx;
-    out.rdx = context.Rdx;
-    out.rsi = context.Rsi;
-    out.rdi = context.Rdi;
-    out.r8 = context.R8;
-    out.r9 = context.R9;
-    out.r10 = context.R10;
-    out.r11 = context.R11;
-    out.r12 = context.R12;
-    out.r13 = context.R13;
-    out.r14 = context.R14;
-    out.r15 = context.R15;
-    out.eflags = context.EFlags;
-    out.threadId = threadId;
-    out.captured = true;
-}
+// One thread's register state, in whichever of the two shapes the target needs.
+//
+// A WOW64 thread has two contexts. The 64-bit one, which GetThreadContext
+// returns, describes the thunk layer in wow64cpu.dll -- its Rip is inside
+// Windows' own emulation code, not inside the target's. The 32-bit one, reached
+// through Wow64GetThreadContext, is the code the target actually wrote.
+//
+// Every value this pump cares about lives in the second: the instruction
+// pointer to rewind onto a breakpoint, the trap flag to single-step with, and
+// the debug registers to program. Using the 64-bit context against a 32-bit
+// target does not fail loudly -- it reads and writes a real, valid context that
+// simply belongs to the wrong layer, so breakpoints never fire and rewinding
+// corrupts the emulator.
+class ThreadContext {
+public:
+    enum Parts : unsigned {
+        Control = 1u << 0,
+        Integer = 1u << 1,
+        DebugRegisters = 1u << 2
+    };
+
+    explicit ThreadContext(bool wow64) : wow64_(wow64) {}
+
+    bool get(HANDLE thread, unsigned parts) {
+        if (wow64_) {
+            wow_ = WOW64_CONTEXT{};
+            wow_.ContextFlags = wowFlags(parts);
+            return Wow64GetThreadContext(thread, &wow_) != FALSE;
+        }
+        native_ = CONTEXT{};
+        native_.ContextFlags = nativeFlags(parts);
+        return GetThreadContext(thread, &native_) != FALSE;
+    }
+
+    bool set(HANDLE thread, unsigned parts) {
+        if (wow64_) {
+            wow_.ContextFlags = wowFlags(parts);
+            return Wow64SetThreadContext(thread, &wow_) != FALSE;
+        }
+        native_.ContextFlags = nativeFlags(parts);
+        return SetThreadContext(thread, &native_) != FALSE;
+    }
+
+    [[nodiscard]] std::uint64_t instructionPointer() const {
+        return wow64_ ? static_cast<std::uint64_t>(wow_.Eip) : native_.Rip;
+    }
+
+    void setInstructionPointer(std::uint64_t value) {
+        if (wow64_) {
+            wow_.Eip = static_cast<DWORD>(value);
+        } else {
+            native_.Rip = value;
+        }
+    }
+
+    void orFlags(std::uint32_t bits) {
+        if (wow64_) {
+            wow_.EFlags |= bits;
+        } else {
+            native_.EFlags |= bits;
+        }
+    }
+
+    [[nodiscard]] DWORD64 debugStatus() const {
+        return wow64_ ? static_cast<DWORD64>(wow_.Dr6) : native_.Dr6;
+    }
+
+    void clearDebugStatus() {
+        if (wow64_) {
+            wow_.Dr6 = 0;
+        } else {
+            native_.Dr6 = 0;
+        }
+    }
+
+    void programDebugRegisters(const std::array<DWORD64, debugSlotCount>& addresses, DWORD64 control) {
+        if (wow64_) {
+            wow_.Dr0 = static_cast<DWORD>(addresses[0]);
+            wow_.Dr1 = static_cast<DWORD>(addresses[1]);
+            wow_.Dr2 = static_cast<DWORD>(addresses[2]);
+            wow_.Dr3 = static_cast<DWORD>(addresses[3]);
+            wow_.Dr6 = 0;
+            wow_.Dr7 = static_cast<DWORD>(control);
+        } else {
+            native_.Dr0 = addresses[0];
+            native_.Dr1 = addresses[1];
+            native_.Dr2 = addresses[2];
+            native_.Dr3 = addresses[3];
+            native_.Dr6 = 0;
+            native_.Dr7 = control;
+        }
+    }
+
+    void capture(std::uint32_t threadId, domain::RegisterContext& out) const {
+        if (wow64_) {
+            // r8-r15 stay zero: a 32-bit thread has no such registers, and the
+            // UI hides them rather than printing eight zeroes.
+            out = domain::RegisterContext{};
+            out.rip = wow_.Eip;
+            out.rsp = wow_.Esp;
+            out.rbp = wow_.Ebp;
+            out.rax = wow_.Eax;
+            out.rbx = wow_.Ebx;
+            out.rcx = wow_.Ecx;
+            out.rdx = wow_.Edx;
+            out.rsi = wow_.Esi;
+            out.rdi = wow_.Edi;
+            out.eflags = wow_.EFlags;
+            out.bitness = domain::Bitness::X86;
+        } else {
+            out.rip = native_.Rip;
+            out.rsp = native_.Rsp;
+            out.rbp = native_.Rbp;
+            out.rax = native_.Rax;
+            out.rbx = native_.Rbx;
+            out.rcx = native_.Rcx;
+            out.rdx = native_.Rdx;
+            out.rsi = native_.Rsi;
+            out.rdi = native_.Rdi;
+            out.r8 = native_.R8;
+            out.r9 = native_.R9;
+            out.r10 = native_.R10;
+            out.r11 = native_.R11;
+            out.r12 = native_.R12;
+            out.r13 = native_.R13;
+            out.r14 = native_.R14;
+            out.r15 = native_.R15;
+            out.eflags = native_.EFlags;
+            out.bitness = domain::Bitness::X64;
+        }
+        out.threadId = threadId;
+        out.captured = true;
+    }
+
+private:
+    // The two vocabularies do not share values -- CONTEXT_CONTROL is 0x00100001
+    // and WOW64_CONTEXT_CONTROL is 0x00010001 -- so callers use the Parts enum
+    // above and never touch either constant directly.
+    static DWORD nativeFlags(unsigned parts) {
+        DWORD flags = 0;
+        if (parts & Control) flags |= CONTEXT_CONTROL;
+        if (parts & Integer) flags |= CONTEXT_INTEGER;
+        if (parts & DebugRegisters) flags |= CONTEXT_DEBUG_REGISTERS;
+        return flags;
+    }
+
+    static DWORD wowFlags(unsigned parts) {
+        DWORD flags = 0;
+        if (parts & Control) flags |= WOW64_CONTEXT_CONTROL;
+        if (parts & Integer) flags |= WOW64_CONTEXT_INTEGER;
+        if (parts & DebugRegisters) flags |= WOW64_CONTEXT_DEBUG_REGISTERS;
+        return flags;
+    }
+
+    bool wow64_{};
+    CONTEXT native_{};
+    WOW64_CONTEXT wow_{};
+};
 
 } // namespace
 
@@ -599,6 +807,10 @@ void DebugEventPump::run(std::promise<infra::Result<void>> ready) {
             "Could not open the target for debugging: " + Win32Platform::formatLastError(error), error));
         return;
     }
+
+    // Settled before any debug event can arrive. A process cannot change
+    // bitness while it runs, so this is asked once rather than per event.
+    wow64_ = Win32Platform::isWow64(process_.get());
 
     if (!DebugActiveProcess(pid_)) {
         const DWORD error = GetLastError();
@@ -740,13 +952,12 @@ bool DebugEventPump::rewindThread(std::uintptr_t address, std::uint32_t threadId
     if (!thread) {
         return false;
     }
-    CONTEXT context{};
-    context.ContextFlags = CONTEXT_CONTROL;
-    if (!GetThreadContext(thread.get(), &context)) {
+    ThreadContext context(wow64_);
+    if (!context.get(thread.get(), ThreadContext::Control)) {
         return false;
     }
-    context.Rip = address;
-    return SetThreadContext(thread.get(), &context) != FALSE;
+    context.setInstructionPointer(address);
+    return context.set(thread.get(), ThreadContext::Control);
 }
 
 bool DebugEventPump::anyHardwareArmed() const {
@@ -771,9 +982,8 @@ int DebugEventPump::freeDebugSlot() const {
 }
 
 bool DebugEventPump::writeDebugRegisters(HANDLE thread) const {
-    CONTEXT context{};
-    context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-    if (!GetThreadContext(thread, &context)) {
+    ThreadContext context(wow64_);
+    if (!context.get(thread, ThreadContext::DebugRegisters)) {
         return false;
     }
 
@@ -792,16 +1002,10 @@ bool DebugEventPump::writeDebugRegisters(HANDLE thread) const {
         control |= lengthBits(info.length) << (18 + slot * 4);
     }
 
-    context.Dr0 = addresses[0];
-    context.Dr1 = addresses[1];
-    context.Dr2 = addresses[2];
-    context.Dr3 = addresses[3];
-    // Stale status bits would make the next exception look like a hit from a
-    // register that has since been reused.
-    context.Dr6 = 0;
-    context.Dr7 = control;
-    context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-    return SetThreadContext(thread, &context) != FALSE;
+    // programDebugRegisters also clears DR6: stale status bits would make the
+    // next exception look like a hit from a register that has since been reused.
+    context.programDebugRegisters(addresses, control);
+    return context.set(thread, ThreadContext::DebugRegisters);
 }
 
 void DebugEventPump::applyDebugRegistersToAllThreads() const {
@@ -849,9 +1053,8 @@ bool DebugEventPump::handleBreakpoint(std::uintptr_t address, std::uint32_t thre
         }
 
         UniqueHandle thread(OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, threadId));
-        CONTEXT context{};
-        context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
-        if (!thread || !GetThreadContext(thread.get(), &context)) {
+        ThreadContext context(wow64_);
+        if (!thread || !context.get(thread.get(), ThreadContext::Control | ThreadContext::Integer)) {
             infra::Logger::instance().error("Breakpoint at " + domain::toHex(address) +
                                             " was hit but its thread could not be read: " +
                                             Win32Platform::formatLastError());
@@ -860,11 +1063,12 @@ bool DebugEventPump::handleBreakpoint(std::uintptr_t address, std::uint32_t thre
             return true;
         }
 
-        // int3 has already executed, so RIP sits one byte past the breakpoint.
-        // Resuming from there runs the tail of a half-decoded instruction,
-        // which is exactly what used to crash the target.
-        context.Rip = address;
-        captureRegisters(context, threadId, entry->second.lastHit);
+        // int3 has already executed, so the instruction pointer sits one byte
+        // past the breakpoint. Resuming from there runs the tail of a
+        // half-decoded instruction, which is exactly what used to crash the
+        // target.
+        context.setInstructionPointer(address);
+        context.capture(threadId, entry->second.lastHit);
 
         // Put the original instruction back so the thread can execute it, and
         // arm the trap flag so we get control again immediately afterwards.
@@ -873,9 +1077,9 @@ bool DebugEventPump::handleBreakpoint(std::uintptr_t address, std::uint32_t thre
                                             restored.error());
             return true;
         }
-        context.EFlags |= trapFlag;
+        context.orFlags(trapFlag);
 
-        if (!SetThreadContext(thread.get(), &context)) {
+        if (!context.set(thread.get(), ThreadContext::Control | ThreadContext::Integer)) {
             infra::Logger::instance().error("Could not rewind the thread at " + domain::toHex(address) + ": " +
                                             Win32Platform::formatLastError());
             // Leave the original byte in place: the breakpoint stops working,
@@ -948,13 +1152,13 @@ DebugEventPump::HardwareVerdict DebugEventPump::handleHardwareHit(std::uint32_t 
         return HardwareVerdict::NotOurs;
     }
 
-    CONTEXT context{};
-    context.ContextFlags = CONTEXT_DEBUG_REGISTERS | CONTEXT_CONTROL | CONTEXT_INTEGER;
-    if (!GetThreadContext(thread.get(), &context)) {
+    ThreadContext context(wow64_);
+    if (!context.get(thread.get(),
+                     ThreadContext::DebugRegisters | ThreadContext::Control | ThreadContext::Integer)) {
         return HardwareVerdict::NotOurs;
     }
 
-    const DWORD64 fired = context.Dr6 & debugStatusMask;
+    const DWORD64 fired = context.debugStatus() & debugStatusMask;
     if (fired == 0) {
         // A real single step, or somebody else's. Not ours to claim.
         return HardwareVerdict::NotOurs;
@@ -975,27 +1179,28 @@ DebugEventPump::HardwareVerdict DebugEventPump::handleHardwareHit(std::uint32_t 
         // the breakpoint was removed and its exception arrived afterwards. Still
         // ours, so still swallowed -- and the status bits have to be cleared or
         // it reports again on every later exception.
-        context.Dr6 = 0;
-        context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-        SetThreadContext(thread.get(), &context);
+        context.clearDebugStatus();
+        if (!context.set(thread.get(), ThreadContext::DebugRegisters)) {
+            infra::Logger::instance().warn("Could not clear DR6 after a stale hardware trap on thread " +
+                                           std::to_string(threadId) + ".");
+        }
         return HardwareVerdict::Stale;
     }
 
-    captureRegisters(context, threadId, hit->lastHit);
+    context.capture(threadId, hit->lastHit);
     hit->hitCount += 1;
     snapshot = *hit;
 
     // An execute breakpoint faults before the instruction runs, so resuming
     // as-is would fault on it again immediately and the target would never make
     // progress. A data breakpoint traps after the access and needs none of this.
-    context.Dr6 = 0;
+    context.clearDebugStatus();
+    unsigned parts = ThreadContext::DebugRegisters;
     if (hit->kind == domain::BreakpointKind::HardwareExecute) {
-        context.EFlags |= resumeFlag;
-        context.ContextFlags = CONTEXT_DEBUG_REGISTERS | CONTEXT_CONTROL;
-    } else {
-        context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        context.orFlags(resumeFlag);
+        parts |= ThreadContext::Control;
     }
-    if (!SetThreadContext(thread.get(), &context)) {
+    if (!context.set(thread.get(), parts)) {
         infra::Logger::instance().error("A hardware breakpoint at " + domain::toHex(hit->address) +
                                         " was hit but its thread could not be resumed cleanly: " +
                                         Win32Platform::formatLastError());

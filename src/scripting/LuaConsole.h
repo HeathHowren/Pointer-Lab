@@ -74,6 +74,16 @@ private:
     static int l_thread(lua_State* state);
     static int l_loadlibrary(lua_State* state);
 
+    // The window, for scripted figure capture. Every one of these goes through
+    // services::uiCommands(), which is null when nothing is driving a window --
+    // in the tests, for instance -- and they say so rather than failing oddly.
+    static int l_screenshot(lua_State* state);
+    static int l_select_panel(lua_State* state);
+    static int l_set_layout(lua_State* state);
+    static int l_set_window_size(lua_State* state);
+    static int l_wait_frames(lua_State* state);
+    static int l_quit(lua_State* state);
+
     services::RuntimeServices& services_;
     lua_State* state_{};
 

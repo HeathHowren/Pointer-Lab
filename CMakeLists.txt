@@ -3,7 +3,7 @@
 # the default build.
 cmake_minimum_required(VERSION 3.28)
 
-project(PointerLab VERSION 2.1.0 LANGUAGES C CXX)
+project(PointerLab VERSION 3.0.0 LANGUAGES C CXX)
 
 # The C++ standard is deliberately NOT set globally. Keystone vendors a
 # C++14-era LLVM fork that uses std::unary_function and std::iterator, both
@@ -137,12 +137,21 @@ endif()
 add_library(pointerlab_core STATIC
     src/domain/Domain.cpp
     src/domain/AddressList.cpp
+    src/domain/Structure.cpp
     src/domain/TargetSession.cpp
+    src/engine_aa/AutoAssembler.cpp
     src/engine_asm/Assembler.cpp
+    src/engine_debug/AccessWatch.cpp
     src/engine_disasm/Disassembler.cpp
+    src/engine_export/TrainerExport.cpp
     src/engine_inject/Injector.cpp
+    src/engine_patch/PatchRegistry.cpp
     src/engine_pointer/PointerScanner.cpp
     src/engine_scan/MemoryScanner.cpp
+    src/engine_speed/SpeedController.cpp
+    src/engine_struct/Dissector.cpp
+    src/engine_symbols/ExportResolver.cpp
+    src/engine_symbols/SymbolTable.cpp
     src/infra/CrashHandler.cpp
     src/infra/Logger.cpp
     src/infra/Paths.cpp
@@ -151,6 +160,7 @@ add_library(pointerlab_core STATIC
     src/scripting/LuaConsole.cpp
     src/scripting/LuaScanner.cpp
     src/services/RuntimeServices.cpp
+    src/services/UiCommands.cpp
     src/storage/ProjectStore.cpp
 )
 
@@ -159,11 +169,18 @@ add_library(pointerlab_core STATIC
 # component with no test coverage.
 set(POINTERLAB_UI_SOURCES
     src/ui/UiApp.cpp
+    src/ui/UiAutomation.cpp
     src/ui/UiLayout.cpp
     src/ui/UiMenu.cpp
     src/ui/UiPanelsTarget.cpp
     src/ui/UiPanelsScan.cpp
+    src/ui/UiPanelsSymbols.cpp
+    src/ui/UiPanelsScripts.cpp
+    src/ui/UiPanelsStructures.cpp
+    src/ui/UiPanelsSpeed.cpp
+    src/ui/UiPanelsAccess.cpp
     src/ui/UiPanelsMemory.cpp
+    src/ui/UiPanelsPatches.cpp
     src/ui/UiPanelsTools.cpp
     src/ui/UiProject.cpp
     src/ui/UiWindows.cpp
@@ -201,6 +218,11 @@ target_link_libraries(pointerlab_core
         psapi
         dbghelp
         advapi32
+        # The PNG encoder behind screenshot(). A system component, not a new
+        # dependency: a figure has to come out as a real image file, and adding
+        # an image library to write one would be out of proportion.
+        windowscodecs
+        ole32
 )
 
 # ---------------------------------------------------------------------------
@@ -236,6 +258,107 @@ target_link_libraries(PointerLab PRIVATE
 target_link_options(PointerLab PRIVATE "/MANIFEST:NO")
 
 # ---------------------------------------------------------------------------
+# Speed-hack payloads
+#
+# Two builds of one source, because a DLL has to match the architecture of the
+# process it is loaded into and Pointer Lab attaches to both. They are put next
+# to PointerLab.exe, which is where infra::Paths::speedPayload looks.
+# ---------------------------------------------------------------------------
+
+add_library(PointerLabSpeed64 SHARED src/payload/SpeedHook.cpp)
+target_compile_features(PointerLabSpeed64 PRIVATE cxx_std_20)
+target_compile_definitions(PointerLabSpeed64 PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(PointerLabSpeed64 PRIVATE pointerlab_warnings)
+set_target_properties(PointerLabSpeed64 PROPERTIES OUTPUT_NAME "PointerLabSpeed64")
+add_dependencies(PointerLab PointerLabSpeed64)
+
+option(POINTERLAB_BUILD_PAYLOAD32 "Build the 32-bit speed-hack payload" ON)
+
+if(POINTERLAB_BUILD_PAYLOAD32 AND MSVC)
+    include(ExternalProject)
+    ExternalProject_Add(pointerlab_speed32
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/payload32
+        BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/payload32-build
+        CMAKE_GENERATOR ${CMAKE_GENERATOR}
+        CMAKE_GENERATOR_PLATFORM Win32
+        CMAKE_ARGS
+            -DPOINTERLAB_WARNINGS_AS_ERRORS=${POINTERLAB_WARNINGS_AS_ERRORS}
+        BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --config $<CONFIG>
+        # Without this the sub-build runs exactly once, ever: ExternalProject
+        # stamps the build step on first success and does not know that
+        # SpeedHook.cpp changed. A 32-bit payload silently months behind the
+        # 64-bit one is the worst possible version of that bug, because the two
+        # are supposed to be the same source and the difference only shows up in
+        # the targets nobody tests.
+        BUILD_ALWAYS 1
+        INSTALL_COMMAND ""
+        BUILD_BYPRODUCTS <BINARY_DIR>/$<CONFIG>/PointerLabSpeed32.dll
+    )
+    ExternalProject_Add_Step(pointerlab_speed32 stage
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                <BINARY_DIR>/$<CONFIG>/PointerLabSpeed32.dll
+                $<TARGET_FILE_DIR:PointerLab>/PointerLabSpeed32.dll
+        DEPENDEES build
+        ALWAYS TRUE
+    )
+    add_dependencies(PointerLab pointerlab_speed32)
+endif()
+
+# ---------------------------------------------------------------------------
+# The tutorial target
+#
+# A first-class shipped artifact rather than a sample. Everything else Pointer
+# Lab can be pointed at belongs to somebody else, which means a reader's first
+# lesson depends on a third-party download that may have changed since the book
+# was written. This one is built from this repository and checks its own answers.
+# ---------------------------------------------------------------------------
+
+add_executable(PointerLabTutorial WIN32 src/tutorial/main.cpp)
+target_compile_features(PointerLabTutorial PRIVATE cxx_std_20)
+target_compile_definitions(PointerLabTutorial PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(PointerLabTutorial PRIVATE pointerlab_warnings)
+# See src/tutorial32/CMakeLists.txt: folding two writer functions into one would
+# make one step's answer solve another.
+#
+# /utf-8 because the lesson text is prose with real punctuation in it, and
+# without it MSVC reads the file in the system code page and the em dashes reach
+# the window as mojibake.
+if(MSVC)
+    target_link_options(PointerLabTutorial PRIVATE /OPT:NOICF)
+    target_compile_options(PointerLabTutorial PRIVATE /utf-8)
+endif()
+
+option(POINTERLAB_BUILD_TUTORIAL32 "Build the 32-bit tutorial target" ON)
+
+if(POINTERLAB_BUILD_TUTORIAL32 AND MSVC)
+    include(ExternalProject)
+    ExternalProject_Add(pointerlab_tutorial32
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/tutorial32
+        BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/tutorial32-build
+        CMAKE_GENERATOR ${CMAKE_GENERATOR}
+        CMAKE_GENERATOR_PLATFORM Win32
+        CMAKE_ARGS
+            -DPOINTERLAB_WARNINGS_AS_ERRORS=${POINTERLAB_WARNINGS_AS_ERRORS}
+        BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --config $<CONFIG>
+        # See the payload above: without this the sub-build happens once and
+        # every later edit to the shared source reaches only the 64-bit build.
+        BUILD_ALWAYS 1
+        INSTALL_COMMAND ""
+        BUILD_BYPRODUCTS <BINARY_DIR>/$<CONFIG>/PointerLabTutorial32.exe
+    )
+    ExternalProject_Add_Step(pointerlab_tutorial32 stage
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                <BINARY_DIR>/$<CONFIG>/PointerLabTutorial32.exe
+                $<TARGET_FILE_DIR:PointerLab>/PointerLabTutorial32.exe
+        DEPENDEES build
+        ALWAYS TRUE
+    )
+    add_dependencies(PointerLab pointerlab_tutorial32)
+endif()
+
+add_dependencies(PointerLab PointerLabTutorial)
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
@@ -250,6 +373,25 @@ endif()
 # ---------------------------------------------------------------------------
 
 install(TARGETS PointerLab RUNTIME DESTINATION .)
+
+# Beside the executable, because that is where SpeedController looks for them.
+# A zip missing these has a speed hack that reports a broken install rather than
+# one that quietly does nothing, but it is still a broken install.
+install(TARGETS PointerLabSpeed64 RUNTIME DESTINATION .)
+if(TARGET pointerlab_speed32)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/payload32-build/$<CONFIG>/PointerLabSpeed32.dll
+            DESTINATION .)
+endif()
+
+# Both widths of the tutorial, as first-class artifacts. A reader who has to go
+# and find a practice target before the first lesson usually finds a different
+# version of one.
+install(TARGETS PointerLabTutorial RUNTIME DESTINATION .)
+if(TARGET pointerlab_tutorial32)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/tutorial32-build/$<CONFIG>/PointerLabTutorial32.exe
+            DESTINATION .)
+endif()
+
 install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE
     ${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md
@@ -265,6 +407,13 @@ install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/docs/iretable-format.md
     ${CMAKE_CURRENT_SOURCE_DIR}/docs/architecture.md
     DESTINATION docs
+)
+
+# Shipped rather than left in the repository, because it is the answer to "how
+# were these figures made" and that question is asked by someone holding the zip.
+install(FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/capture-figures.lua
+    DESTINATION scripts
 )
 
 set(CPACK_PACKAGE_NAME "PointerLab")

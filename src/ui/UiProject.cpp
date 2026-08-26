@@ -48,10 +48,20 @@ std::string UiApp::projectTitle() const {
 
 void UiApp::newProject() {
     confirmAction("Start a new project?",
-                  "This clears the address list. Anything not saved is lost.",
+                  "This clears the address list, the scripts and the structures. Any script that is "
+                  "currently on is switched off first, so the target is put back as it was. Anything not "
+                  "saved is lost.",
                   "New project",
                   [this] {
                       services_.session().addressList().replace({});
+                      if (auto disabled = services_.autoAssembler().disableAll(); !disabled) {
+                          notifyError("Some scripts could not be switched off: " + disabled.error());
+                      }
+                      services_.autoAssembler().forgetAll();
+                      editScriptId_ = 0;
+                      services_.dissector().forgetAll();
+                      structureId_ = 0;
+                      editFieldOffset_.reset();
                       projectPath_.clear();
                       notifyInfo("Started a new project.");
                   });
@@ -61,7 +71,26 @@ bool UiApp::saveProjectTo(const std::filesystem::path& path, bool quiet) {
     storage::ProjectTable table;
     table.lastPid = services_.session().pid();
     table.lastProcessName = services_.session().processName();
+    table.lastBitness = services_.session().bitness();
     table.entries = services_.session().addressList().snapshot();
+    for (const auto& symbol : services_.symbols().symbols()) {
+        // Only the ones defined from an expression. A symbol pinned to a bare
+        // address means nothing in the next run, and saving it would hand the
+        // reader a name that points somewhere arbitrary.
+        if (!symbol.expression.empty()) {
+            table.symbols.push_back({symbol.name, symbol.expression});
+        }
+    }
+    for (const auto& script : services_.autoAssembler().scripts()) {
+        table.scripts.push_back({script.name, script.source});
+    }
+    // A structure with no fields is a name and nothing else; saving it would
+    // only put an empty row in front of whoever opens the file next.
+    for (const auto& structure : services_.dissector().structures()) {
+        if (!structure.fields.empty()) {
+            table.structures.push_back(structure);
+        }
+    }
 
     auto saved = projectStore_.save(path, table);
     if (!saved) {
@@ -84,9 +113,80 @@ bool UiApp::loadProjectFrom(const std::filesystem::path& path, bool quiet) {
     }
 
     const auto count = loaded.value().entries.size();
+    const auto tableBitness = loaded.value().lastBitness;
+
+    // Re-resolved against the target that is attached now, not restored to the
+    // address they had when the file was written -- which is the whole reason
+    // the expression is what gets saved. A symbol whose module is not loaded is
+    // named in the log rather than silently dropped.
+    services_.symbols().clear();
+    std::size_t unresolvedSymbols{};
+    for (const auto& symbol : loaded.value().symbols) {
+        if (auto defined = services_.symbols().define(services_.session(), symbol.name, symbol.expression);
+            !defined) {
+            infra::Logger::instance().warn("Could not resolve symbol \"" + symbol.name + "\" (" +
+                                           symbol.expression + "): " + defined.error());
+            ++unresolvedSymbols;
+        }
+    }
+    if (unresolvedSymbols > 0 && !quiet) {
+        notifyError(std::to_string(unresolvedSymbols) +
+                    " symbol(s) could not be resolved against this target; see the log.");
+    }
+
+    // Scripts belonging to the outgoing project are switched off before they are
+    // dropped, so loading a table never abandons a patch with nothing left that
+    // knows how to undo it. They arrive switched off: nothing has been written
+    // yet, and the user gets to read a script before it runs.
+    if (auto disabled = services_.autoAssembler().disableAll(); !disabled && !quiet) {
+        notifyError("Some scripts from the previous project could not be switched off: " + disabled.error());
+    }
+    services_.autoAssembler().forgetAll();
+    editScriptId_ = 0;
+    for (const auto& script : loaded.value().scripts) {
+        services_.autoAssembler().add(script.name, script.source);
+    }
+    if (!loaded.value().scripts.empty()) {
+        showScripts_ = true;
+    }
+
+    // Structure ids are assigned by the dissector, not carried in the file:
+    // nothing outside a single run refers to one, and generating them here
+    // keeps two tables loaded in sequence from colliding.
+    services_.dissector().forgetAll();
+    structureId_ = 0;
+    editFieldOffset_.reset();
+    std::size_t unusableStructures{};
+    for (const auto& structure : loaded.value().structures) {
+        const auto id = services_.dissector().add(structure.name);
+        if (auto applied = services_.dissector().setFields(id, structure.fields); !applied) {
+            infra::Logger::instance().warn("Structure \"" + structure.name +
+                                           "\" could not be loaded: " + applied.error());
+            ++unusableStructures;
+        }
+    }
+    if (unusableStructures > 0 && !quiet) {
+        notifyError(std::to_string(unusableStructures) +
+                    " structure(s) had overlapping or zero-width fields and were left empty; see the log.");
+    }
+    if (!loaded.value().structures.empty()) {
+        showStructures_ = true;
+    }
+
     services_.session().addressList().replace(std::move(loaded.value().entries));
     if (!quiet) {
         notifyInfo("Loaded " + std::to_string(count) + " entries from " + path.filename().string() + ".");
+    }
+
+    // Offsets in a pointer chain were measured against a particular struct
+    // layout, and that layout is not the same in a 32- and a 64-bit build of
+    // the same program: every embedded pointer changes size. Such a chain still
+    // resolves -- to the wrong field -- so this has to be said out loud rather
+    // than left for the user to discover through a value that looks almost right.
+    if (services_.session().attached() && tableBitness != services_.session().bitness()) {
+        notifyError(std::string("This table was built against a ") + domain::bitnessName(tableBitness) +
+                    " target, but the attached process is " + domain::bitnessName(services_.session().bitness()) +
+                    ". Pointer chains will resolve to the wrong offsets.");
     }
     return true;
 }
@@ -132,7 +232,12 @@ void UiApp::loadSession() {
 }
 
 void UiApp::saveSession() {
-    if (services_.session().addressList().snapshot().empty()) {
+    // Nothing worth restoring only if *both* halves are empty. Checking the
+    // address list alone used to throw away a session whose whole content was a
+    // script.
+    if (services_.session().addressList().snapshot().empty() &&
+        services_.autoAssembler().scripts().empty() &&
+        services_.dissector().structures().empty()) {
         return;
     }
     saveProjectTo(infra::Paths::sessionFile(), true);

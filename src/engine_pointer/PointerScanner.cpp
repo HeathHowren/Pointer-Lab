@@ -99,7 +99,10 @@ void PointerScanJob::run(PointerScanOptions options) {
     const auto modules = session_.modules();
     const auto regions = session_.regions();
     const auto total = eligibleBytes(regions) * std::max<std::uint32_t>(1, options.maxDepth);
-    constexpr std::size_t ptrSize = sizeof(void*);
+    // The target's pointer width, not the host's. Striding 8 bytes through a
+    // 32-bit process reads every pointer as two pointers glued together, so the
+    // scan completes normally and reports nothing found.
+    const std::size_t ptrSize = session_.pointerSize();
     std::uint64_t visited{};
 
     infra::Logger::instance().info(
@@ -155,6 +158,8 @@ void PointerScanJob::run(PointerScanOptions options) {
 
                 const auto& buffer = bytes.value();
                 for (std::size_t i = 0; i + ptrSize <= buffer.size() && !cancel_; i += ptrSize) {
+                    // Zero-initialised first, so a 4-byte copy into the low half
+                    // zero-extends rather than leaving the top half as garbage.
                     std::uintptr_t pointerValue{};
                     std::memcpy(&pointerValue, buffer.data() + i, ptrSize);
                     if (pointerValue == 0) {
@@ -325,28 +330,34 @@ infra::Result<std::uintptr_t> resolveChain(domain::TargetSession& session, const
     // certainly somewhere else, which is exactly what the chain exists to
     // survive.
     std::uintptr_t moduleBase{};
-    for (const auto& module : session.modules()) {
-        if (sameName(module.name, chain.moduleName)) {
-            moduleBase = module.base;
-            break;
+    if (chain.moduleRooted()) {
+        for (const auto& module : session.modules()) {
+            if (sameName(module.name, chain.moduleName)) {
+                moduleBase = module.base;
+                break;
+            }
+        }
+        if (moduleBase == 0) {
+            return Address::fail(domain::narrow(chain.moduleName) + " is not loaded in the target.");
         }
     }
-    if (moduleBase == 0) {
-        return Address::fail(domain::narrow(chain.moduleName) + " is not loaded in the target.");
-    }
+    // With no module name, moduleOffset is an absolute base. Only manual entry
+    // produces one of those, and such a chain does not survive a restart.
 
     std::uintptr_t address = moduleBase + chain.moduleOffset;
     for (const auto offset : chain.offsets) {
-        auto bytes = session.readBytes(address, sizeof(std::uintptr_t));
-        if (!bytes || bytes.value().size() != sizeof(std::uintptr_t)) {
+        // readPointer knows the target's width. Reading sizeof(std::uintptr_t)
+        // here used to pull 8 bytes out of a 32-bit process, so the first hop
+        // produced an address made of two unrelated pointers and every chain
+        // "broke" at step one.
+        auto pointer = session.readPointer(address);
+        if (!pointer) {
             return Address::fail("The chain broke: nothing readable at " + domain::toHex(address) + ".");
         }
-        std::uintptr_t pointer{};
-        std::memcpy(&pointer, bytes.value().data(), sizeof(pointer));
-        if (pointer == 0) {
+        if (pointer.value() == 0) {
             return Address::fail("The chain broke: a null pointer at " + domain::toHex(address) + ".");
         }
-        address = pointer + static_cast<std::uintptr_t>(offset);
+        address = pointer.value() + static_cast<std::uintptr_t>(offset);
     }
     return Address::ok(address);
 }

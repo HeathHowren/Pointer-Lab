@@ -26,6 +26,17 @@ public:
     [[nodiscard]] std::wstring processName() const;
     [[nodiscard]] HANDLE processHandle() const;
 
+    // Pointer width of the attached target, determined once at attach. Returns
+    // X64 when nothing is attached, which is the harmless default: every engine
+    // that consults it also checks attached() first.
+    [[nodiscard]] Bitness bitness() const;
+    [[nodiscard]] std::size_t pointerSize() const;
+
+    // Reads one target-width pointer. Every chain walk and pointer scan goes
+    // through this rather than memcpy-ing sizeof(std::uintptr_t), which read 8
+    // bytes out of a 32-bit process and found nothing.
+    infra::Result<std::uintptr_t> readPointer(std::uintptr_t address) const;
+
     [[nodiscard]] std::vector<ModuleInfo> modules() const;
     [[nodiscard]] std::vector<MemoryRegion> regions() const;
 
@@ -43,6 +54,7 @@ private:
     platform_win32::UniqueHandle process_;
     std::uint32_t pid_{};
     bool readOnly_{};
+    Bitness bitness_{Bitness::X64};
     std::wstring processName_;
     std::vector<ModuleInfo> modules_;
     std::vector<MemoryRegion> regions_;

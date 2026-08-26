@@ -11,7 +11,7 @@ namespace ire::ui {
 void UiApp::renderPointerPanel() {
     ImGui::Begin("Pointer Scanner", &showPointerScanner_);
     ImGui::SetNextItemWidth(220.0f);
-    ImGui::InputTextWithHint("Target address", "0x7FF...", pointerTarget_.data(), pointerTarget_.size());
+    ImGui::InputTextWithHint("Target address", "0x7FF... or a symbol", pointerTarget_.data(), pointerTarget_.size());
     ImGui::SameLine();
     ImGui::SetNextItemWidth(100.0f);
     ImGui::InputInt("Max depth", &pointerDepth_);
@@ -31,7 +31,7 @@ void UiApp::renderPointerPanel() {
     if (ImGui::Button("Start pointer scan")) {
         if (!services_.session().attached()) {
             notifyError("Attach to a process first.");
-        } else if (auto target = parseAddress(pointerTarget_.data())) {
+        } else if (auto target = resolveAddress(pointerTarget_.data())) {
             engine_pointer::PointerScanOptions options;
             options.target = *target;
             options.maxDepth = static_cast<std::uint32_t>(pointerDepth_);
@@ -46,7 +46,7 @@ void UiApp::renderPointerPanel() {
     if (ImGui::Button("Rescan")) {
         if (!services_.session().attached()) {
             notifyError("Attach to a process first.");
-        } else if (auto target = parseAddress(pointerTarget_.data())) {
+        } else if (auto target = resolveAddress(pointerTarget_.data())) {
             services_.pointerScanJob().filter(*target);
         } else {
             notifyError("Target address is not valid hexadecimal.");
@@ -157,7 +157,7 @@ void UiApp::renderInjectionPanel() {
             ImGui::InputText("Thread start", threadStart_.data(), threadStart_.size());
             ImGui::InputText("Thread parameter", threadParameter_.data(), threadParameter_.size());
             if (ImGui::Button("Create remote thread")) {
-                if (auto start = parseAddress(threadStart_.data())) {
+                if (auto start = resolveAddress(threadStart_.data())) {
                     const auto param = parseAddress(threadParameter_.data()).value_or(0);
                     const auto startAddress = *start;
                     confirmAction(
@@ -290,7 +290,7 @@ void UiApp::renderLuaScannerPanel() {
                     }
                     ImGui::SameLine();
                     if (ImGui::SmallButton("View")) {
-                        copyText(memoryAddress_.data(), memoryAddress_.size(), domain::toHex(results[i].address));
+                        gotoMemory(results[i].address);
                         copyText(disasmAddress_.data(), disasmAddress_.size(), domain::toHex(results[i].address));
                     }
                     ImGui::PopID();

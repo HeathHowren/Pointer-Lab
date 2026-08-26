@@ -273,6 +273,82 @@ certain.
 
 Fails with an explicit message on a 32-bit (WOW64) target.
 
+## The window
+
+Six functions that drive the user interface, so that a set of figures can be
+captured by running a file rather than by a person with a screenshot key. They
+exist because a figure captured by hand is correct on the day it was taken and
+silently wrong afterwards: a panel gets renamed, a control moves, and nobody
+finds out until a reader follows an instruction that no longer matches the
+picture beside it.
+
+All six return `true`, or `false, message`. All six **block until the window has
+actually done the work** — a call that returned before the change was on screen
+would defeat the whole purpose — and all six return
+`false, "There is no window to drive."` in a build with no frontend attached.
+
+They pair with the `--script` flag:
+
+```
+PointerLab.exe --script scripts\capture-figures.lua
+```
+
+which runs a script once the window is up. It is the same language, the same
+sandbox and the same console; the flag only saves you pasting it in.
+
+### `screenshot(path)` → boolean [, string]
+
+Writes the window's back buffer to `path` as a PNG, creating the parent
+directory if needed. A relative path is relative to the working directory.
+
+This captures **the window, not the screen**, so nothing behind it and no
+notification that happens to appear can end up in a figure. The cost is that a
+panel dragged out into its own OS window will not be in the picture — see
+`set_layout` below.
+
+It is the one exception to the sandbox, which otherwise removes `io` entirely.
+It writes one file, of one format, holding a picture of this program's own
+window; it is not a way back to arbitrary writes.
+
+### `select_panel(name)` → boolean [, string]
+
+Opens the named panel if it is closed and brings it to the front of its tab bar.
+The name is the panel's title exactly as it appears in the View menu — `"Access
+Watch"`, `"Speed and Export"`, `"Pointer Scanner"`.
+
+A name that is not a panel fails rather than doing nothing, which is the point:
+that is how a renamed panel is discovered by a script run rather than by a
+reader.
+
+### `set_layout(name)` → boolean [, string]
+
+`"default"` restores the shipped arrangement. It is the only name there is, and
+the only arrangement a figure should be captured in — everything is docked in
+it, so everything ends up in the back buffer.
+
+### `set_window_size(width, height)` → boolean [, string]
+
+Sets the **client** size, between 320×240 and 8192×8192. Client rather than
+window, because the frame around it differs between Windows versions and themes
+and is not in the picture anyway.
+
+Worth doing first in any capture script: two figures taken a year apart are then
+the same number of pixels, and a reader comparing them is comparing the tool
+rather than somebody's window manager.
+
+### `wait_frames(n = 1)` → boolean [, string]
+
+Lets `n` frames be drawn before the script continues, up to 600.
+
+Not optional in a capture script. Opening a panel takes effect on the next frame
+and its docking settles on the one after that, so a screenshot taken immediately
+catches the layout mid-move. A dozen frames is a comfortable margin.
+
+### `quit()` → boolean [, string]
+
+Closes the window. The usual exit path runs, so the session is autosaved as it
+would be if you had closed it yourself.
+
 ## Sandbox
 
 These are removed before your script runs:

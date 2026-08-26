@@ -22,18 +22,37 @@ namespace testsupport {
 // The value tests/helper/main.cpp starts out holding.
 inline constexpr std::int32_t needleValue = 0x5AFE1234;
 
-inline std::filesystem::path helperPath() {
+// Which build of the helper to spawn. The x86 one is the same source compiled
+// for Win32, and exists so the WOW64 paths -- 4-byte pointer chains, legacy-mode
+// disassembly, Wow64Get/SetThreadContext -- are covered by tests rather than by
+// assertion in a comment.
+enum class HelperBitness {
+    X64,
+    X86
+};
+
+inline std::filesystem::path helperPath(HelperBitness bitness = HelperBitness::X64) {
     wchar_t buffer[MAX_PATH]{};
     const DWORD length = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
     if (length == 0 || length >= MAX_PATH) {
         return {};
     }
-    return std::filesystem::path(std::wstring(buffer, length)).parent_path() / L"pointerlab_test_helper.exe";
+    const wchar_t* name =
+        bitness == HelperBitness::X86 ? L"pointerlab_test_helper32.exe" : L"pointerlab_test_helper.exe";
+    return std::filesystem::path(std::wstring(buffer, length)).parent_path() / name;
+}
+
+// True when that build of the helper is present. The 32-bit one is optional
+// (-DPOINTERLAB_BUILD_HELPER32=OFF), so its tests skip rather than fail when it
+// was not built -- a missing optional fixture is not a regression.
+inline bool helperAvailable(HelperBitness bitness) {
+    std::error_code ec;
+    return std::filesystem::exists(helperPath(bitness), ec);
 }
 
 class HelperProcess {
 public:
-    HelperProcess() {
+    explicit HelperProcess(HelperBitness bitness = HelperBitness::X64) : bitness_(bitness) {
         SECURITY_ATTRIBUTES attributes{};
         attributes.nLength = sizeof(attributes);
         attributes.bInheritHandle = TRUE;
@@ -59,7 +78,7 @@ public:
         startup.hStdOutput = childStdOut;
         startup.hStdError = childStdOut;
 
-        std::wstring command = L"\"" + helperPath().wstring() + L"\"";
+        std::wstring command = L"\"" + helperPath(bitness_).wstring() + L"\"";
         PROCESS_INFORMATION information{};
         const BOOL created = CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
                                             nullptr, nullptr, &startup, &information);
@@ -143,6 +162,28 @@ public:
         return static_cast<std::int64_t>(std::strtoll(line.c_str() + 10, nullptr, 10));
     }
 
+    // The helper's own view of the two clocks the speed payload hooks:
+    // GetTickCount64 in milliseconds, and the performance counter in its own
+    // units. Both zero if the helper did not answer.
+    struct Times {
+        std::uint64_t milliseconds{};
+        std::int64_t counter{};
+    };
+    Times times() {
+        if (!send("TIME")) {
+            return {};
+        }
+        const auto line = readLine();
+        if (line.rfind("TIMEVAL ", 0) != 0) {
+            return {};
+        }
+        char* end = nullptr;
+        Times value{};
+        value.milliseconds = std::strtoull(line.c_str() + 8, &end, 10);
+        value.counter = end != nullptr ? std::strtoll(end, nullptr, 10) : 0;
+        return value;
+    }
+
 private:
     static std::uintptr_t parseHexReply(const std::string& line, const char* prefix) {
         if (line.rfind(prefix, 0) != 0) {
@@ -176,6 +217,7 @@ private:
         return line;
     }
 
+    HelperBitness bitness_{HelperBitness::X64};
     HANDLE toChild_{};
     HANDLE fromChild_{};
     HANDLE process_{};
@@ -191,10 +233,14 @@ struct AttachedHelper {
     ire::platform_win32::Win32Platform platform;
     ire::domain::TargetSession session{platform};
 
-    AttachedHelper() {
+    explicit AttachedHelper(HelperBitness bitness = HelperBitness::X64) : helper(bitness) {
         REQUIRE(helper.ready());
         REQUIRE(session.attach(helper.pid()).has_value());
         REQUIRE(session.attached());
+        // The whole point of the x86 fixture: if the session reports the wrong
+        // width, every assertion below it is testing the wrong thing.
+        REQUIRE(session.bitness() ==
+                (bitness == HelperBitness::X86 ? ire::domain::Bitness::X86 : ire::domain::Bitness::X64));
     }
 };
 

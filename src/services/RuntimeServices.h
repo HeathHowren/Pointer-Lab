@@ -1,11 +1,17 @@
 #pragma once
 
 #include "domain/TargetSession.h"
+#include "engine_aa/AutoAssembler.h"
 #include "engine_asm/Assembler.h"
+#include "engine_debug/AccessWatch.h"
 #include "engine_disasm/Disassembler.h"
 #include "engine_inject/Injector.h"
+#include "engine_patch/PatchRegistry.h"
 #include "engine_pointer/PointerScanner.h"
 #include "engine_scan/MemoryScanner.h"
+#include "engine_speed/SpeedController.h"
+#include "engine_struct/Dissector.h"
+#include "engine_symbols/SymbolTable.h"
 #include "platform_win32/Win32Platform.h"
 #include "scripting/LuaScanner.h"
 
@@ -55,7 +61,11 @@ private:
 // hit; keeping a second copy here is how the two used to disagree.
 class BreakpointService {
 public:
-    explicit BreakpointService(domain::TargetSession& session);
+    // watch, when given, is fed every hit so it can aggregate. It is an
+    // optional observer rather than a dependency: breakpoints work perfectly
+    // well without one, and the breakpoint tests construct this service on its
+    // own to say exactly that.
+    explicit BreakpointService(domain::TargetSession& session, engine_debug::AccessWatch* watch = nullptr);
     ~BreakpointService();
 
     infra::Result<void> attachDebugger();
@@ -80,6 +90,7 @@ private:
     void queueEvent(std::string message, bool rateLimited);
 
     domain::TargetSession& session_;
+    engine_debug::AccessWatch* watch_{};
     platform_win32::DebugEventPump debugPump_;
     mutable std::mutex mutex_;
     std::vector<std::string> events_;
@@ -100,6 +111,19 @@ public:
     engine_asm::Assembler& assembler() { return assembler_; }
     engine_inject::Injector& injector() { return injector_; }
     BreakpointService& breakpoints() { return breakpoints_; }
+    engine_debug::AccessWatch& accessWatch() { return accessWatch_; }
+    engine_patch::PatchRegistry& patches() { return patches_; }
+    engine_symbols::SymbolTable& symbols() { return symbols_; }
+    engine_aa::AutoAssembler& autoAssembler() { return autoAssembler_; }
+    engine_struct::Dissector& dissector() { return dissector_; }
+    engine_speed::SpeedController& speed() { return speed_; }
+
+    // Starts a "find what accesses/writes this address" watch: one hardware
+    // data breakpoint plus the aggregation on top of it. Fails with the
+    // debugger's own message when the debugger cannot attach or all four debug
+    // registers are already taken.
+    infra::Result<void> startAccessWatch(std::uintptr_t address, std::uint8_t length, bool writesOnly);
+    void stopAccessWatch();
 
 private:
     platform_win32::Win32Platform platform_;
@@ -111,6 +135,15 @@ private:
     engine_disasm::Disassembler disassembler_;
     engine_asm::Assembler assembler_;
     engine_inject::Injector injector_;
+    // Declared before breakpoints_, which takes a pointer to it.
+    engine_debug::AccessWatch accessWatch_;
+    engine_patch::PatchRegistry patches_;
+    engine_symbols::SymbolTable symbols_;
+    // Declared after everything it borrows, so the references it holds outlive
+    // it in the reverse order they were built.
+    engine_aa::AutoAssembler autoAssembler_;
+    engine_struct::Dissector dissector_;
+    engine_speed::SpeedController speed_;
     BreakpointService breakpoints_;
 };
 

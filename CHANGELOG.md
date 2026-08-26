@@ -3,6 +3,453 @@
 All notable changes to Pointer Lab are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.0] — 2026-08-25
+
+The release that makes Pointer Lab a complete tool rather than a capable one:
+32-bit targets, find-what-writes, an auto-assembler, a structure dissector, a
+speed hack, trainer export, a tutorial to practise all of it on, and a way to
+capture the figures that document it.
+
+**A major version, and the reason is 32-bit targets.** Everything above the raw
+read behaved differently for a WOW64 process and none of it said so, which is a
+behaviour change rather than an addition: code that appeared to work now works,
+and code that appeared to work *and did the wrong thing* now does the right one.
+
+Nothing in the file formats is breaking. `.iretable` project files are still
+**format version 3**, because unrecognised record types have always been skipped
+rather than rejected and every record added this release is a new type. Settings
+still live in their own file.
+
+### The panel names are now a promise
+
+The panel titles and menu paths in this release will not be renamed within the
+3.x series. Anything written against them — a book, a course, a capture script,
+a note to yourself — can quote them and stay correct until 4.0.
+
+This is a real constraint accepted on purpose. Writing that says "open the
+Access Watch panel" is worthless the moment the panel is called something else,
+and the person who finds out is a reader following an instruction that no longer
+matches what is in front of them. A better name for a panel is not worth that;
+it can wait for a major version, where a changed name is expected and looked for.
+
+What is covered: the titles of every panel, the top-level menus and the items in
+them, and the names of the Lua functions. What is not: the arrangement of
+controls inside a panel, wording of explanatory text, colours, and anything
+marked as new in this changelog after 3.0.0 ships.
+
+### Added
+
+- **32-bit (WOW64) target support.** Pointer Lab is still a 64-bit process, but
+  it now attaches to 32-bit targets and treats them as such throughout, rather
+  than refusing injection and quietly misbehaving everywhere else.
+
+  Attaching and scanning a WOW64 target already worked, because
+  `ReadProcessMemory` does not care about the target's width. Everything built
+  on top of it did, and every one of the failures was silent:
+
+  - The pointer scanner strode 8 bytes at a time, reading each pair of 32-bit
+    pointers as one 64-bit pointer. The scan ran to completion and reported no
+    chains found.
+  - `resolveChain` read `sizeof(std::uintptr_t)` bytes per hop, so the first hop
+    produced an address spliced from two unrelated pointers and every chain
+    "broke" at step one.
+  - The disassembler was pinned to `ZYDIS_MACHINE_MODE_LONG_64` and the
+    assembler to `KS_MODE_64`. Neither errors on 32-bit code — most byte
+    sequences decode as *something* in both modes — so the listing was
+    plausible and wrong. In the other direction, `inc eax` assembles to one byte
+    in 32-bit and two in 64-bit, because `0x40` became the REX prefix.
+  - The debug pump called `GetThreadContext`, which for a WOW64 thread returns
+    the **64-bit** context describing Windows' emulation layer in
+    `wow64cpu.dll` rather than the code the target actually wrote. It now uses
+    `Wow64Get/SetThreadContext` for such targets, for breakpoint rewinding, the
+    trap flag and the debug registers alike.
+
+  Target width is settled once at attach and shown as a badge in the command
+  bar, because a DLL you inject has to match it.
+
+- **Export resolution out of the target.** A new `engine_symbols/ExportResolver`
+  parses a module's PE export directory from the target's own memory. This is
+  what makes injection into a 32-bit process possible: `GetProcAddress` answers
+  about *our* address space, and a WOW64 target has an entirely different
+  kernel32 mapped. Forwarder chains are followed, which is not optional —
+  `kernel32!LoadLibraryW` forwards to KERNELBASE on every modern Windows, and an
+  RVA that lands inside the export directory is a `"DLL.Function"` string rather
+  than code. A resolver that missed that would hand the remote thread an address
+  inside a string table.
+
+  No DbgHelp, no PDBs and no symbol server: an export directory is present in
+  every PE by construction.
+
+- **A 32-bit test helper.** `tests/helper/main.cpp` is now also built for Win32,
+  via an `ExternalProject` because MSVC's architecture comes from the generator
+  rather than a target property. Eleven new cases in `tests/test_wow64.cpp`
+  cover recognition, scanning, chain resolution, pointer width, legacy-mode
+  disassembly, per-bitness assembly and export resolution. Optional with
+  `-DPOINTERLAB_BUILD_HELPER32=OFF`, in which case those cases `SKIP` rather
+  than pass, so a missing fixture cannot be mistaken for coverage.
+
+- **"Find out what writes to this address."** The mechanism — a hardware data
+  breakpoint — was already there. What was missing is everything that makes it
+  answerable: hits arrived as individual rate-limited notifications that
+  scrolled past faster than anyone could read, and the register state was
+  buried behind a popup on the breakpoint row.
+
+  The new Access Watch panel aggregates every hit by the instruction
+  responsible, busiest first, and offers each one to the disassembler or
+  replaces it with nops in place. Two details it gets right:
+
+  - A data breakpoint traps *after* the access completes, so the instruction
+    pointer the CPU reports names the instruction *after* the one that touched
+    the address. x86 cannot be disassembled backwards, so the accessing
+    instruction is identified by decoding from every start position within 24
+    bytes and letting each one vote for the boundary it finds; the boundary with
+    the most votes wins, which works because x86 is self-synchronising. When
+    nothing lands on the trap address, the panel says the
+    instruction could not be identified and disables the NOP button, rather than
+    naming the wrong instruction confidently and sending the reader to patch
+    innocent code.
+  - Each captured register is interpreted against the live target: pointing into
+    a module (named as `module+offset`, i.e. static), pointing into mapped
+    memory, or — the one that matters — sitting a short way below the watched
+    address, in which case it is called out as the probable base of the
+    structure containing the value. That is the step from "I found my health" to
+    "I found the player object".
+
+  Resolution is cached per instruction, so a watch on something inside a render
+  loop resolves two or three sites and then costs a map lookup per hit. Distinct
+  sites are capped at 256, and reaching the cap is reported rather than
+  silently truncating the list.
+
+- **A patch list, so patching is no longer one-way.** Every byte Pointer Lab
+  writes into a target's code — an assembler patch, or "replace with code that
+  does nothing" from the Access Watch — is recorded in a new `engine_patch`
+  registry together with the bytes it replaced, and the new Patches panel turns
+  each one on and off with a tick box.
+
+  This was the largest hole in the tool for anyone learning with it. Nopping an
+  instruction took one click; putting it back took restarting the target, so the
+  natural experiment — change it, see what breaks, change it back — cost a
+  reload every time.
+
+  Three behaviours are deliberate:
+
+  - **Overlapping patches are refused.** A second patch inside the first would
+    capture the first one's *replacement* bytes as its "original", and disabling
+    the two in the wrong order would leave a mixture that was never real code.
+    Refusing is the only answer that keeps every recorded original genuinely
+    original.
+  - **Drift is reported.** If the bytes at a patch are not what the registry
+    last wrote there — the target rewriting its own code, an anti-tamper check,
+    a write that went around the registry — the row is flagged, because a tick
+    box that claims a state the memory does not have is worse than no tick box.
+  - **Detaching forgets rather than restores.** A patch someone left applied may
+    be the entire point of the session, so it stays applied; what is not
+    optional is saying so, and the detach confirmation now names how many
+    patches are about to become permanent.
+
+- **Six more scan modes, and text search.** The scanner had six modes and no way
+  to search for a string, which left several of the most common questions
+  unaskable.
+
+  - **Increased by** and **decreased by** take an exact delta. "I lost exactly 7
+    health" is far more selective than "it went down", and usually finishes a
+    search in one step where the loose form takes four. Integer deltas wrap with
+    their type deliberately: a `u8` going 3 → 253 really did decrease by 6, and
+    rejecting that would drop the entry the user is hunting.
+  - **Same as first scan** compares against the first scan of the run rather
+    than the previous one. A value that changed and came back is *unchanged*
+    from the first scan and *changed* from the one before it; those are
+    different questions, and only one of them was answerable before.
+    `ScanResult` gained a `first` field to carry it, which is why this could not
+    be expressed as a variation on Unchanged.
+  - **Value between**, **bigger than** and **smaller than** test the value as it
+    stands, so unlike the relative modes they filter on a *first* scan with
+    nothing to compare against. Bounds given the wrong way round are ordered
+    rather than refused: "between 200 and 100" is a typo with exactly one
+    plausible meaning.
+  - **`str` and `wstr`** search text, one byte and two bytes per character. The
+    second is what Windows means by "Unicode" and is how almost every player
+    name and chat line in a Windows game is actually stored, so a scanner
+    without it finds nothing and gives no hint why. Neither searches for a
+    terminator, because a name in a game's memory is usually a fixed buffer with
+    junk after the text. Case folding is optional and covers A–Z only; folding
+    the rest correctly needs the Unicode tables and a locale, and a scanner that
+    folded some characters and not others without saying which would be worse
+    than one that is clear about where it stops.
+
+  The modes that order values are not offered for text or byte patterns at all,
+  rather than offered and always returning nothing.
+
+- **Static addresses are marked.** A scan result or address-list row that falls
+  inside a loaded module image is shown in green, with its `module+offset` on
+  hover. This is the check that separates an address worth writing down from one
+  that is wherever the allocator happened to put it this launch, and it was
+  previously only discoverable by opening the Modules panel and comparing ranges
+  by eye.
+
+- **Address expressions everywhere.** Every address box now accepts
+  `client.dll+0x4A2C10`, `kernel32.LoadLibraryW+0x10`, a module name on its own,
+  or a symbol you have defined, each followed by any number of `+`/`-` offsets —
+  the memory viewer, the disassembler, the breakpoint panel, the pointer scanner
+  and the address list alike. A new Symbols panel defines and lists them.
+
+  Symbols are saved in the project file as the **expression**, not the address it
+  produced, and re-resolved against whatever is attached on load. An address
+  recorded in one run names nothing in the next.
+
+- **Manual pointer-chain entry.** The address list's editor gained a Pointer
+  tick box: the address field becomes the chain's base and an offsets field says
+  how to walk from it, with the resolved address and the value at it shown live
+  while you type. A chain that is one offset wrong resolves to a plausible
+  address holding a plausible number, so being able to see what it lands on
+  before committing is the difference between finding the mistake now and finding
+  it after an hour.
+
+  A base inside a module is recorded as `module+offset` automatically, which is
+  what makes the chain survive a restart. A base that is not gets recorded
+  absolute and marked amber, in the editor and on the row, rather than silently
+  producing a chain that works today and not tomorrow.
+
+- **A navigable hex editor.** The memory viewer was a fixed 16–4096 byte
+  read-only window with a blind patch box. It now scrolls by row, by page and by
+  wheel, edits a byte in place when you click it, follows a byte as a pointer,
+  and highlights bytes that changed since the last frame.
+
+  Scrolling *backwards* from a known address until the start of a structure
+  appears is one of the most useful things a person can do with a hex editor,
+  and until now it was a hex-arithmetic exercise: work out the address you
+  wanted and retype it. The changed-byte highlight is the other half — watching
+  a structure repaint itself finds a field without scanning for it at all.
+
+- **A structure dissector.** A named layout — offset, type, name — laid over
+  several addresses at once, with an auto-guess pass that fills it in from what
+  is actually at those addresses. Reachable as "Dissect this" from the address
+  list, the scan results and the hex editor.
+
+  The comparison is the point, not the display. A game does not have one player,
+  it has an array of them: put two instances side by side and the fields that
+  read the same in both are padding or shared state, while the ones that differ
+  are what actually describes an object. Those rows are greyed rather than
+  hidden, so the eye lands on the ones worth naming.
+
+  The guess calls a slot a pointer when its value at every address is either
+  null or inside a committed region and at least one is non-null — otherwise
+  every run of zeroes in an object would be full of pointers. It calls a slot a
+  float when the bytes decode to a finite, non-denormal value between 1e-6 and
+  1e9, which works because the two readings barely overlap: a small integer
+  reads as a denormal around 1e-43, and an ordinary float reads as an integer in
+  the hundreds of millions. Eight-byte slots are only considered at eight-byte
+  alignment; looking anyway finds "pointers" straddling two unrelated fields.
+
+  Negative offsets are legal, because where an object starts is a guess and
+  finding that the real one begins earlier should not mean renumbering
+  everything below it. Overlapping fields are refused, for the same reason
+  overlapping patches are.
+
+- **An auto-assembler.** A script with an `[ENABLE]` section that patches the
+  target and a `[DISABLE]` section that puts it back, in the tradition the
+  literature teaches, with `aobscanmodule`, `alloc`, `label`, `registersymbol`,
+  `unregistersymbol`, `dealloc`, `define`, `assert` and `db`/`dw`/`dd`/`dq`.
+  Three templates — AOB injection, code cave, full injection — are one button
+  away, and the Access Watch offers "Script" on any row so an injection starts
+  from the instruction you just found, with the address, the bytes and the module
+  already filled in.
+
+  The point is not convenience. A code injection performed by hand is a sequence
+  of steps that exist only while you remember them; the same injection written
+  down is one artefact that can be read, checked before it runs, shared, and
+  re-run after the target restarts and everything has moved. Four decisions
+  follow from taking that seriously:
+
+  - **`check` compiles without writing.** Directives run, patterns are scanned
+    for, asserts are evaluated, the layout is computed — and nothing is written
+    or allocated. Reading a script critically before running it is only possible
+    if you can see what it worked out.
+  - **`aobscanmodule` refuses a pattern that matches twice.** Taking the first
+    match produces a script that works today and patches something unrelated
+    after the next update.
+  - **`assert` is in every generated template.** A script written against one
+    build names addresses that mean something else in the next, and without the
+    check the first thing it does after an update is overwrite the wrong
+    instruction.
+  - **A failed run rolls back.** Patches applied before the failure are removed
+    in reverse and allocations are freed, so a script never leaves a target half
+    injected. `[DISABLE]` restores the patches first and frees the cave second:
+    a thread already on its way into an unmapped cave lands in nothing.
+
+  `alloc(name, size, near)` allocates within ±2 GB of the hint by walking free
+  regions with `VirtualQueryEx`, and **fails** rather than falling back to a
+  distant block — a five-byte `jmp` encodes a signed 32-bit displacement, so a
+  cave out of that range cannot be reached at all.
+
+  Scripts are saved in the project file and always load switched off.
+
+- **Scripted figure capture.** Six new Lua functions — `screenshot(path)`,
+  `select_panel(name)`, `set_layout("default")`, `set_window_size(w, h)`,
+  `wait_frames(n)` and `quit()` — plus a `--script <file.lua>` command-line flag
+  that runs a script once the window is up. `scripts/capture-figures.lua` uses
+  them to write one PNG per panel.
+
+  A figure captured by hand is correct on the day it was taken and silently
+  wrong afterwards: a panel gets renamed, a control moves, and nobody finds out
+  until a reader follows an instruction that no longer matches the picture
+  beside it. A capture script is re-run on every release, and a panel that no
+  longer answers to its name fails the run.
+
+  Two details are what make a capture reproducible rather than merely
+  automatic. The window is given an exact *client* size, so figures taken a year
+  apart are the same number of pixels and the frame around them — which differs
+  between Windows versions — is not in the picture. And every call blocks until
+  the UI thread has done the work, with `wait_frames` on top of that, because
+  opening a panel takes effect on the next frame and its docking settles on the
+  one after: a capture that followed immediately would catch the layout
+  mid-move.
+
+  What is captured is the window's own back buffer, not the screen, so nothing
+  behind the window and no notification that happens to appear can end up in a
+  figure. The cost is that a panel dragged out into its own OS window will not
+  appear, which is what `set_layout("default")` is for.
+
+  `screenshot` is the one exception to the script sandbox, which removes `io`
+  entirely. It writes one file, of one format, holding a picture of this
+  program's own window; it is not a way back to arbitrary writes.
+
+- **`PointerLabTutorial.exe` — a practice target that ships with the tool.** Nine
+  gated lessons, in both x86 and x64 builds, each one revealing the password for
+  the next so nothing has to be repeated: attach and write · exact value scan ·
+  unknown initial value with increased/decreased · float and double · find out
+  what writes · a pointer · a multi-level pointer · code injection · shared code.
+
+  It exists because every other thing to practise on belongs to somebody else. A
+  reader's first lesson should not depend on a third-party download that has
+  changed since it was written about, and the answer should be checkable by
+  something other than the reader's own confidence.
+
+  The checks are arranged so that the plausible-but-wrong technique fails, which
+  is most of what makes them worth doing:
+
+  - Step 5 calls the writing code and reads back immediately, so freezing the
+    value passes nothing and only removing the instruction does.
+  - Steps 6 and 7 move the object and scramble it before checking, so an address
+    found by scanning is pointing at freed memory by then and only an entry that
+    re-resolves its chain survives.
+  - Step 9 damages both objects directly and reads back immediately, so neither
+    a frozen value nor a NOP passes — only code that looks at which object is
+    being written to.
+
+  The values live in one allocation with the individual values a page apart
+  rather than in adjacent globals, because adjacent globals hand over the next
+  step's answer in the same scan result. The writer functions are `noinline` and
+  the link runs with `/OPT:NOICF`, so two steps cannot end up sharing one
+  instruction.
+
+- **A speed hack.** A payload DLL — `PointerLabSpeed64.dll` and
+  `PointerLabSpeed32.dll`, shipped beside the executable — redirects the four
+  clocks a Windows game can ask: `QueryPerformanceCounter`, `GetTickCount`,
+  `GetTickCount64` and `timeGetTime`. Presets from 0.1x to 5x, a logarithmic
+  slider, and "Remove the hook" behind a confirmation.
+
+  A game does not measure time; it asks Windows what time it is and multiplies
+  everything it does that frame by how much has passed. So this is not a hack on
+  the game at all, and it needs to know nothing about the game — which is why one
+  payload works everywhere the technique works.
+
+  - **The clock is rebased, not multiplied.** `real * scale` makes the clock jump
+    by hours the instant the rate changes, and jump *backwards* when it is
+    lowered. A game that sees time go backwards does not slow down; it divides by
+    a negative delta and detonates. Each clock keeps the real and fake values from
+    when the rate last changed and answers
+    `fake = baseFake + (real - baseReal) * scale`, re-reading both bases on every
+    change, so the reported clock is continuous and monotonic across every one.
+  - **Import tables are patched, not instructions.** Every
+    `call [__imp_QueryPerformanceCounter]` reads its destination from a table in
+    the game's own image; writing a different address there redirects all of them
+    at once, and the undo is writing the old value back. No length decoder, no
+    trampoline, and nothing rewritten while another thread is executing it.
+  - **The modules that implement the clocks are skipped**, which is a correctness
+    requirement rather than caution: kernel32 is largely stubs that reach the
+    implementation in kernelbase *through kernel32's own import table*, so
+    patching it sends the hook's call to the real function straight back into the
+    hook and the target dies of a stack overflow on the first frame that asks the
+    time.
+  - **A hook that found nothing to hook says so.** `hookedImports` is reported in
+    the panel, and zero after a successful injection means this target does not
+    ask for the time through its import table — it resolved the address at
+    runtime, or it uses a clock this hook does not cover. That is a real limit of
+    the technique and it is stated rather than left looking like a bug.
+  - **A speed outside 0.05x–20x is refused, not clamped.** A silently clamped
+    request for 1000x looks exactly like a hook that is installed and doing
+    nothing.
+
+- **Trainer export.** The address list can be written out as a small CMake
+  project — `main.cpp`, `CMakeLists.txt`, `README.md` — for a standalone external
+  trainer with hotkey toggles.
+
+  It generates **source, not an executable**, and that is the point. A generated
+  binary is a black box: it works, and you have learned nothing about why.
+  Generated source is the same trainer with its reasoning visible — how a process
+  is found by name, how a module base is looked up, how a pointer chain is walked
+  one dereference at a time. It is also the difference between a program you have
+  read and a program of unknown provenance you are about to point at your own
+  machine.
+
+  Module-rooted entries are emitted as `module+offset` plus their offset chain
+  and survive a restart. Absolute ones are emitted too and labelled as a hazard,
+  in the source and again in the README, because they are valid only for the run
+  they were found in. Entries with no frozen value have nothing to write and are
+  listed under "Not exported" rather than dropped. The architecture is written
+  into both the CMake file and the build instructions: a trainer built for the
+  wrong width reads two pointers as one, every chain breaks at the first hop, and
+  nothing reports an error.
+
+### Changed
+
+- `domain::RegisterContext` records the bitness it was captured with, and the
+  breakpoint panel names registers from it — `EAX`/`EIP` for a 32-bit thread,
+  with `r8`–`r15` hidden rather than shown as eight zeroes they do not have.
+- A pointer chain with **no offsets** is now legal, and means "the base itself,
+  with no dereferencing" — which is how a static address is written down.
+  Manual entry produces these; the pointer scanner never does. A chain with an
+  **absolute base** and no module name is legal too, for the same reason, and is
+  marked as not surviving a restart wherever it appears.
+- `.iretable` files gain `struct` and `field` records, holding structure
+  layouts. The addresses a layout was last applied to are deliberately not
+  saved: a layout is knowledge about the game and outlives every run, while the
+  address of one particular enemy does not survive the next respawn.
+- `.iretable` files gain a `script` record, holding an auto-assembler script's
+  name and source. The source is one field however long it is, because the
+  escaping already turns newlines into `\n`. The enabled flag is deliberately not
+  stored: at load time nothing has been patched, so a script claiming to be on
+  would offer to undo changes that were never made.
+- Detaching now switches off every enabled script first, which is the opposite of
+  what it does with patches, and the asymmetry is deliberate. A patch is one run
+  of bytes with one undo record, so leaving it applied is a coherent state. A
+  script's changes are a set of patches plus memory it allocated plus symbols it
+  published, and only the script knows how to take them apart — once the handle
+  closes, nothing can.
+- `.iretable` files gain a `symbol` record, and the chain fields now distinguish
+  "no chain" from "a chain whose base is absolute". Chain offsets are written as
+  the unsigned bit pattern rather than as a signed value, because a manual chain
+  may step backwards through a structure and a minus sign only round-tripped by
+  accident.
+- The 32-bit sub-builds (the speed payload, the tutorial and the test helper) are
+  marked `BUILD_ALWAYS`. `ExternalProject` stamps its build step on first success
+  and has no idea the shared source changed, so a 32-bit binary could sit months
+  behind the 64-bit one built from the same file — which is the worst version of
+  that bug, because the two are supposed to be identical and the difference only
+  appears in the targets nobody tests.
+- Detaching also puts the clocks back and forgets where the payload's control
+  block lived, for the same reason chains are re-resolved rather than reused:
+  those addresses name nothing in the next process.
+- `.iretable` files gain a `bitness` record. **The format version is still 3**,
+  deliberately: unrecognised record types have always been skipped rather than
+  rejected, so a 2.1.0 build reads a file containing it and ignores the line,
+  whereas `IRETABLE 4` would make it refuse the whole table. Loading a table
+  against a target of the other bitness now warns, because pointer chains
+  survive a restart but not a change of architecture — the offsets were measured
+  against a struct layout in which every embedded pointer was a different size,
+  so the chain still resolves, to the wrong field.
+
 ## [2.1.0] — 2026-08-22
 
 A feature release, and the first one that is not mostly repair work. Every item

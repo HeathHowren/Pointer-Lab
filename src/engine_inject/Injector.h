@@ -18,6 +18,10 @@ public:
     // PAGE_* constant. Returns the base address in the target's address space.
     infra::Result<std::uintptr_t> allocate(std::size_t size, DWORD protection);
 
+    // Allocates within 2 GB of hint, so a five-byte `jmp` from there can reach
+    // it. Fails rather than allocating out of reach; see Win32Platform.
+    infra::Result<std::uintptr_t> allocateNear(std::size_t size, DWORD protection, std::uintptr_t hint);
+
     // Releases a block previously returned by allocate(). Freeing memory that
     // the target itself is still using will crash it.
     infra::Result<void> free(std::uintptr_t address);

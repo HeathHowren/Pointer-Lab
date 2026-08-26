@@ -60,9 +60,17 @@ std::vector<domain::Instruction> Disassembler::disassemble(domain::TargetSession
     }
     const auto& buffer = bytes.value();
 
+    // The machine mode has to match the target, not the host. Decoding 32-bit
+    // code as long mode does not fail cleanly -- it silently produces plausible
+    // but wrong instructions, because most byte sequences decode as *something*
+    // in both modes, and a REX prefix in long mode is an INC/DEC in legacy.
+    const bool legacy = session.bitness() == domain::Bitness::X86;
+    const auto machineMode = legacy ? ZYDIS_MACHINE_MODE_LEGACY_32 : ZYDIS_MACHINE_MODE_LONG_64;
+    const auto stackWidth = legacy ? ZYDIS_STACK_WIDTH_32 : ZYDIS_STACK_WIDTH_64;
+
     ZydisDecoder decoder;
     ZydisFormatter formatter;
-    if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)) ||
+    if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, machineMode, stackWidth)) ||
         !ZYAN_SUCCESS(ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL))) {
         return instructions;
     }
@@ -135,6 +143,91 @@ std::vector<std::uint8_t> padToInstructionBoundary(const Disassembler& disassemb
         patch.resize(covered, 0x90);
     }
     return patch;
+}
+
+std::optional<domain::Instruction> precedingInstruction(const Disassembler& disassembler,
+                                                        domain::TargetSession& session, std::uintptr_t address) {
+    // 15 is the architectural maximum instruction length, so a lookback beyond
+    // it can only add noise for the single instruction we want. 24 gives a
+    // little more room for the *run* leading up to it, which is what the
+    // all-valid check below actually judges.
+    constexpr std::size_t maxLookback = 24;
+
+    if (!session.attached() || address <= maxLookback) {
+        return std::nullopt;
+    }
+
+    // Candidates, by the address the preceding instruction would start at, with
+    // how many independent start positions agree on it.
+    struct Candidate {
+        domain::Instruction instruction;
+        int votes{};
+    };
+    std::vector<Candidate> candidates;
+
+    for (std::size_t back = maxLookback; back >= 1; --back) {
+        const auto start = address - back;
+        // At most `back` instructions can fit in `back` bytes, since the
+        // shortest instruction is one byte.
+        const auto listing = disassembler.disassemble(session, start, back);
+        if (listing.empty()) {
+            continue;
+        }
+
+        std::optional<domain::Instruction> landing;
+        for (const auto& instruction : listing) {
+            // An undecodable byte means this alignment is not real code, and a
+            // zero-length entry would loop forever.
+            if (!instruction.valid || instruction.bytes.empty()) {
+                break;
+            }
+            const auto end = instruction.address + instruction.bytes.size();
+            if (end == address) {
+                landing = instruction;
+                break;
+            }
+            if (end > address) {
+                // Straddles the target: this start position is out of phase.
+                break;
+            }
+        }
+        if (!landing) {
+            continue;
+        }
+
+        const auto existing = std::find_if(candidates.begin(), candidates.end(), [&landing](const Candidate& c) {
+            return c.instruction.address == landing->address;
+        });
+        if (existing != candidates.end()) {
+            existing->votes += 1;
+        } else {
+            candidates.push_back({*landing, 1});
+        }
+    }
+
+    if (candidates.empty()) {
+        return std::nullopt;
+    }
+
+    // Take the boundary the most start positions agree on.
+    //
+    // Trying only the longest lookback and trusting it is not good enough: the
+    // bytes before a function, or before whatever the trap landed in, need not
+    // be code at all, and a run of them can decode cleanly and land on the
+    // target by luck. What makes this tractable is that x86 is
+    // self-synchronising -- decoders started at different offsets converge
+    // within a few instructions -- so the *correct* boundary is the one most
+    // independent alignments reach, while a coincidental one is reached by one
+    // or two. Ties go to the longer instruction, since a longer encoding
+    // agreed on by as many alignments is the less likely coincidence.
+    const auto best = std::max_element(candidates.begin(), candidates.end(), [](const Candidate& a,
+                                                                                const Candidate& b) {
+        if (a.votes != b.votes) {
+            return a.votes < b.votes;
+        }
+        return a.instruction.bytes.size() < b.instruction.bytes.size();
+    });
+    return best->instruction;
 }
 
 } // namespace ire::engine_disasm

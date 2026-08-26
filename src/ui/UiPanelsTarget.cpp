@@ -114,7 +114,7 @@ void UiApp::renderRegionsPanel() {
             // differ only above bit 31 share widget state.
             ImGui::PushID(reinterpret_cast<const void*>(region.base));
             if (ImGui::SmallButton("View")) {
-                copyText(memoryAddress_.data(), memoryAddress_.size(), domain::toHex(region.base));
+                gotoMemory(region.base);
                 showMemoryViewer_ = true;
             }
             ImGui::PopID();

@@ -3,6 +3,7 @@
 #include "domain/Domain.h"
 #include "engine_pointer/PointerScanner.h"
 #include "infra/Logger.h"
+#include "services/UiCommands.h"
 
 #include <algorithm>
 #include <chrono>
@@ -272,6 +273,13 @@ void LuaConsole::registerApi() {
     pushFunction(state_, this, "alloc", &LuaConsole::l_alloc);
     pushFunction(state_, this, "thread", &LuaConsole::l_thread);
     pushFunction(state_, this, "loadlibrary", &LuaConsole::l_loadlibrary);
+
+    pushFunction(state_, this, "screenshot", &LuaConsole::l_screenshot);
+    pushFunction(state_, this, "select_panel", &LuaConsole::l_select_panel);
+    pushFunction(state_, this, "set_layout", &LuaConsole::l_set_layout);
+    pushFunction(state_, this, "set_window_size", &LuaConsole::l_set_window_size);
+    pushFunction(state_, this, "wait_frames", &LuaConsole::l_wait_frames);
+    pushFunction(state_, this, "quit", &LuaConsole::l_quit);
 }
 
 void LuaConsole::appendOutput(std::string text) {
@@ -713,6 +721,93 @@ int LuaConsole::l_loadlibrary(lua_State* state) {
     // code rather than claiming a failure that did not happen.
     lua_pushinteger(state, result.value());
     return 2;
+}
+
+// ---------------------------------------------------------------------------
+// Driving the window
+//
+// These are the exception to the sandbox above, and the exception is narrow on
+// purpose. `io` is removed because a pasted script has no business touching the
+// file system; screenshot() writes one file, of a known format, holding a
+// picture of this program's own window. It is not a way back to arbitrary
+// writes.
+//
+// All six block until the UI thread has done the work, because the only reason
+// any of them exists is to make a capture reproducible, and a call that returned
+// before the window had changed would defeat that entirely.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Every one of these functions ends the same way, and the shared ending is the
+// null check: linking the engines without the frontend is a supported thing to
+// do, and it should fail with a sentence rather than a fault.
+int pushUiResult(lua_State* state, const infra::Result<void>& result) {
+    if (!result) {
+        lua_pushboolean(state, 0);
+        lua_pushstring(state, result.error().c_str());
+        return 2;
+    }
+    lua_pushboolean(state, 1);
+    return 1;
+}
+
+int noWindow(lua_State* state) {
+    lua_pushboolean(state, 0);
+    lua_pushstring(state, "There is no window to drive. This build has no user interface attached.");
+    return 2;
+}
+
+} // namespace
+
+int LuaConsole::l_screenshot(lua_State* state) {
+    auto* commands = services::uiCommands();
+    if (commands == nullptr) {
+        return noWindow(state);
+    }
+    return pushUiResult(state, commands->screenshot(luaL_checkstring(state, 1)));
+}
+
+int LuaConsole::l_select_panel(lua_State* state) {
+    auto* commands = services::uiCommands();
+    if (commands == nullptr) {
+        return noWindow(state);
+    }
+    return pushUiResult(state, commands->selectPanel(luaL_checkstring(state, 1)));
+}
+
+int LuaConsole::l_set_layout(lua_State* state) {
+    auto* commands = services::uiCommands();
+    if (commands == nullptr) {
+        return noWindow(state);
+    }
+    return pushUiResult(state, commands->setLayout(luaL_optstring(state, 1, "default")));
+}
+
+int LuaConsole::l_set_window_size(lua_State* state) {
+    auto* commands = services::uiCommands();
+    if (commands == nullptr) {
+        return noWindow(state);
+    }
+    const auto width = static_cast<int>(luaL_checkinteger(state, 1));
+    const auto height = static_cast<int>(luaL_checkinteger(state, 2));
+    return pushUiResult(state, commands->setWindowSize(width, height));
+}
+
+int LuaConsole::l_wait_frames(lua_State* state) {
+    auto* commands = services::uiCommands();
+    if (commands == nullptr) {
+        return noWindow(state);
+    }
+    return pushUiResult(state, commands->waitFrames(static_cast<int>(luaL_optinteger(state, 1, 1))));
+}
+
+int LuaConsole::l_quit(lua_State* state) {
+    auto* commands = services::uiCommands();
+    if (commands == nullptr) {
+        return noWindow(state);
+    }
+    return pushUiResult(state, commands->quit());
 }
 
 } // namespace ire::scripting

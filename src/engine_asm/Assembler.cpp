@@ -50,8 +50,8 @@ std::string stripComments(const std::string& source) {
 // would otherwise need its own ks_close.
 class Engine {
 public:
-    Engine() {
-        error_ = ks_open(KS_ARCH_X86, KS_MODE_64, &handle_);
+    explicit Engine(domain::Bitness bitness) {
+        error_ = ks_open(KS_ARCH_X86, bitness == domain::Bitness::X86 ? KS_MODE_32 : KS_MODE_64, &handle_);
         if (error_ == KS_ERR_OK && handle_ != nullptr) {
             error_ = ks_option(handle_, KS_OPT_SYNTAX, KS_OPT_SYNTAX_INTEL);
         }
@@ -77,14 +77,14 @@ private:
 
 } // namespace
 
-infra::Result<std::vector<std::uint8_t>> Assembler::assemble(const std::string& source,
-                                                             std::uintptr_t baseAddress) const {
+infra::Result<std::vector<std::uint8_t>> Assembler::assemble(const std::string& source, std::uintptr_t baseAddress,
+                                                             domain::Bitness bitness) const {
     const auto text = stripComments(source);
     if (text.empty()) {
         return Bytes::fail("Nothing to assemble.");
     }
 
-    Engine engine;
+    Engine engine(bitness);
     if (!engine.ok()) {
         return Bytes::fail(std::string("Could not start the assembler: ") + ks_strerror(engine.error()));
     }
