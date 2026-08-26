@@ -37,27 +37,94 @@ void copyPath(wchar_t (&destination)[MAX_PATH], const std::filesystem::path& pat
     destination[count] = L'\0';
 }
 
-bool writeDumpOfType(EXCEPTION_POINTERS* exceptionInfo, MINIDUMP_TYPE type) {
+// One crash, one request, and `g_handling` already guarantees only one thread
+// ever fills it in. It lives here rather than on the reporting thread's stack
+// because the dump thread may still be writing to it after that thread has
+// given up waiting.
+struct DumpRequest {
+    EXCEPTION_POINTERS* exceptionInfo;
+    DWORD threadId;
+    MINIDUMP_TYPE type;
+    bool written;
+    DWORD error;
+};
+
+DumpRequest g_request{};
+
+void writeDumpOfType(DumpRequest& request) {
+    request.written = false;
+    request.error = 0;
+
     HANDLE file = CreateFileW(g_dumpPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
-        return false;
+        request.error = GetLastError();
+        return;
     }
 
     MINIDUMP_EXCEPTION_INFORMATION information{};
-    information.ThreadId = GetCurrentThreadId();
-    information.ExceptionPointers = exceptionInfo;
+    information.ThreadId = request.threadId;
+    information.ExceptionPointers = request.exceptionInfo;
     information.ClientPointers = FALSE;
 
-    const BOOL written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type,
-                                           exceptionInfo != nullptr ? &information : nullptr, nullptr, nullptr);
+    const BOOL written =
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, request.type,
+                          request.exceptionInfo != nullptr ? &information : nullptr, nullptr, nullptr);
+    if (written == FALSE) {
+        request.error = GetLastError();
+    }
     CloseHandle(file);
-    return written != FALSE;
+    request.written = written != FALSE;
 }
 
-bool writeMinidump(EXCEPTION_POINTERS* exceptionInfo) {
-    if (g_dumpPath[0] == L'\0') {
+DWORD WINAPI dumpThreadMain(LPVOID parameter) {
+    writeDumpOfType(*static_cast<DumpRequest*>(parameter));
+    return 0;
+}
+
+// The dump is written from a thread of its own, never from the thread that
+// crashed.
+//
+// MiniDumpWriteDump walking the stack of the very thread calling it is the
+// fragile arrangement, and it is at its worst on the terminate path, where a
+// C++ exception is still in flight underneath the walk: the call comes back
+// false after having already written most of the file, which is how a crash
+// could leave behind a large .dmp and a log line saying no dump was written.
+// A thread created for the job has a clean stack and nothing in flight, and
+// DbgHelp suspends and walks the crashing thread the way it would from an
+// external debugger -- which is the arrangement the API is documented for.
+bool writeDumpOnOwnThread(EXCEPTION_POINTERS* exceptionInfo, DWORD threadId, MINIDUMP_TYPE type, DWORD& error) {
+    g_request = DumpRequest{exceptionInfo, threadId, type, false, 0};
+
+    const HANDLE thread = CreateThread(nullptr, 0, &dumpThreadMain, &g_request, 0, nullptr);
+    if (thread == nullptr) {
+        // No thread to be had in a process this far gone; an in-thread dump is
+        // still better than none.
+        writeDumpOfType(g_request);
+        error = g_request.error;
+        return g_request.written;
+    }
+
+    // A dump that hangs must not take the rest of the crash report down with
+    // it. The handle is closed and the thread left running on timeout: it is
+    // somewhere inside DbgHelp, and killing it there would be worse than
+    // letting the process exit around it.
+    const DWORD wait = WaitForSingleObject(thread, 60000);
+    CloseHandle(thread);
+    if (wait != WAIT_OBJECT_0) {
+        error = WAIT_TIMEOUT;
         return false;
     }
+    error = g_request.error;
+    return g_request.written;
+}
+
+bool writeMinidump(EXCEPTION_POINTERS* exceptionInfo, DWORD& error) {
+    if (g_dumpPath[0] == L'\0') {
+        error = ERROR_PATH_NOT_FOUND;
+        return false;
+    }
+
+    const DWORD crashedThread = GetCurrentThreadId();
 
     // Enough to get a usable stack and the values around it without writing out
     // the entire address space, which for this application can be very large.
@@ -66,19 +133,16 @@ bool writeMinidump(EXCEPTION_POINTERS* exceptionInfo) {
                                                  MiniDumpWithHandleData |
                                                  MiniDumpWithThreadInfo |
                                                  MiniDumpWithUnloadedModules);
-    if (writeDumpOfType(exceptionInfo, rich)) {
+    if (writeDumpOnOwnThread(exceptionInfo, crashedThread, rich, error)) {
         return true;
     }
 
     // MiniDumpWithIndirectlyReferencedMemory walks everything the stack points
-    // at, and that walk is the part that fails: it can come back false after
-    // having already written most of the file, which is how a crash could leave
-    // behind a large .dmp and a log line saying no dump was written. It is
-    // worst on the terminate path, where an exception is still in flight while
-    // the walk runs. A plain dump needs no walk, so start the file again as one
-    // rather than keep a partial dump nobody is told to send. A stack-only dump
-    // is much less than the full one and much more than nothing.
-    return writeDumpOfType(exceptionInfo, MiniDumpNormal);
+    // at, and that walk is the expensive, failure-prone part. A plain dump
+    // needs no walk, so start the file again as one rather than keep a partial
+    // dump nobody is told to send. A stack-only dump is much less than the full
+    // one and much more than nothing.
+    return writeDumpOnOwnThread(exceptionInfo, crashedThread, MiniDumpNormal, error);
 }
 
 // Deliberately uses the raw Win32 file API rather than the Logger: the Logger
@@ -147,8 +211,18 @@ void report(const wchar_t* what, EXCEPTION_POINTERS* exceptionInfo) {
     const HANDLE log = openCrashLog();
     bool logged = appendCrashLine(log, line);
 
-    const bool dumped = writeMinidump(exceptionInfo);
-    logged = appendCrashLine(log, dumped ? "minidump written\r\n" : "minidump could NOT be written\r\n") && logged;
+    DWORD dumpError{};
+    const bool dumped = writeMinidump(exceptionInfo, dumpError);
+    if (dumped) {
+        logged = appendCrashLine(log, "minidump written\r\n") && logged;
+    } else {
+        // The reason travels with the failure. Without it a report like this
+        // one says only that something went wrong, and the next person to see
+        // it has to reproduce a crash to learn anything more.
+        char failure[128]{};
+        std::snprintf(failure, sizeof(failure), "minidump could NOT be written (error 0x%08lX)\r\n", dumpError);
+        logged = appendCrashLine(log, failure) && logged;
+    }
 
     if (log != INVALID_HANDLE_VALUE) {
         CloseHandle(log);
@@ -216,7 +290,8 @@ void CrashHandler::install(bool interactive) {
 }
 
 bool CrashHandler::writeDumpNow() {
-    return writeMinidump(nullptr);
+    DWORD ignored{};
+    return writeMinidump(nullptr, ignored);
 }
 
 } // namespace ire::infra
