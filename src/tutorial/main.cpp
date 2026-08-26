@@ -435,14 +435,14 @@ bool checkStep4(std::wstring& why) {
         return true;
     }
     if (!health && !ammo) {
-        why = L"Neither is at 5000 yet. Health is a Float and ammo is a Double; a 4 Bytes scan "
-              L"will not find either of them.";
+        why = L"Neither is at 5000 yet. Health is an f32 (float) and ammo is an f64 (double); an "
+              L"i32 (int) scan will not find either of them.";
     } else if (!health) {
-        why = L"Ammo is there, health is not. Health is a Float -- change the value type before "
+        why = L"Ammo is there, health is not. Health is an f32 (float) -- change the Type before "
               L"you scan for it.";
     } else {
-        why = L"Health is there, ammo is not. Ammo is a Double, which is eight bytes rather than "
-              L"four.";
+        why = L"Health is there, ammo is not. Ammo is an f64 (double), which is eight bytes rather "
+              L"than four.";
     }
     return false;
 }
@@ -623,8 +623,9 @@ const Step g_steps[]{
      L"Attach. The command bar should now name this process and its width.\r\n"
      L"2. This step's value lives at the address printed below. It is printed for you exactly "
      L"once: from Step 2 on, finding the address is the work.\r\n"
-     L"3. Open the Memory Viewer panel, type that address into its address box, and change the "
-     L"value to 1337. Adding it to the Address List and editing it there works just as well.\r\n"
+     L"3. Open the Memory Viewer panel, type that address into its address box, press Go, and "
+     L"change the value to 1337. Adding it to the Address List and editing it there works just as "
+     L"well.\r\n"
      L"4. Press Next.\r\n"
      L"\r\n"
      L"The address is different every time this program starts, and it will be different again "
@@ -635,10 +636,10 @@ const Step g_steps[]{
     {L"Step 2 of 9 — Exact value scan", L"016913",
      L"The number below is real memory in this process. Find it.\r\n"
      L"\r\n"
-     L"1. In the Scanner panel set Value type to 4 Bytes and Scan type to Exact value.\r\n"
-     L"2. Type the number shown below and press First Scan. You will get many results: the "
+     L"1. In the Scanner panel set Type to i32 (int) and Mode to Exact value.\r\n"
+     L"2. Type the number shown below and press First scan. You will get many results: the "
      L"number is not unique, and at this point nothing distinguishes the right one.\r\n"
-     L"3. Press Hit me to change it, type the new number, and press Next Scan.\r\n"
+     L"3. Press Hit me to change it, type the new number, and press Next scan.\r\n"
      L"4. Repeat until one result is left. Double-click it to send it to the Address List, set "
      L"its value to 1000, and press Next.\r\n"
      L"\r\n"
@@ -652,10 +653,10 @@ const Step g_steps[]{
      L"This time the number is not shown. You have a health bar and nothing else, which is the "
      L"normal case: a game draws a bar, not an integer.\r\n"
      L"\r\n"
-     L"1. Scan type: Unknown initial value. Value type: 4 Bytes. Press First Scan. Every "
+     L"1. Mode: Unknown initial value. Type: i32 (int). Press First scan. Every "
      L"four-byte value in the process is now a candidate.\r\n"
-     L"2. Press Hit me. Set Scan type to Decreased value and press Next Scan.\r\n"
-     L"3. Press Heal. Set Scan type to Increased value and press Next Scan.\r\n"
+     L"2. Press Hit me. Set Mode to Decreased value and press Next scan.\r\n"
+     L"3. Press Heal. Set Mode to Increased value and press Next scan.\r\n"
      L"4. Alternate until few results remain, then set the survivor to 5000 and press Next.\r\n"
      L"\r\n"
      L"Increased and Decreased compare against the previous scan rather than against a number you "
@@ -665,13 +666,13 @@ const Step g_steps[]{
      L"Hit me", L"Heal", &doStep3Hit, &doStep3Heal, &checkStep3, &stateStep3},
 
     {L"Step 4 of 9 — Float and double", L"127493",
-     L"Health here is a float and ammo is a double. Neither is stored the way you would guess: a "
-     L"4 Bytes scan for 100 will not find a float holding 100.0, because those bytes are "
+     L"Health here is a float and ammo is a double. Neither is stored the way you would guess: an "
+     L"i32 (int) scan for 100 will not find a float holding 100.0, because those bytes are "
      L"00 00 C8 42 rather than 64 00 00 00.\r\n"
      L"\r\n"
-     L"1. Set Value type to Float and find health exactly as you found Step 2's value, typing the "
+     L"1. Set Type to f32 (float) and find health exactly as you found Step 2's value, typing the "
      L"displayed number including its decimals.\r\n"
-     L"2. Set Value type to Double and find ammo. A double is eight bytes, and a float scan will "
+     L"2. Set Type to f64 (double) and find ammo. A double is eight bytes, and a float scan will "
      L"not find it.\r\n"
      L"3. Set both to 5000 or more and press Next.\r\n"
      L"\r\n"
@@ -691,7 +692,7 @@ const Step g_steps[]{
      L"address\". The Access Watch panel opens.\r\n"
      L"3. Press Hit me. One instruction appears, with a hit count and the registers it held when "
      L"it ran.\r\n"
-     L"4. Select it and press \"Replace with NOP\". The patch is padded to the next instruction "
+     L"4. Select it and press \"NOP\". The patch is padded to the next instruction "
      L"boundary, so it replaces whole instructions rather than the first half of one.\r\n"
      L"5. Press Next.\r\n"
      L"\r\n"
