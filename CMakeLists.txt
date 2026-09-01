@@ -3,7 +3,7 @@
 # the default build.
 cmake_minimum_required(VERSION 3.28)
 
-project(PointerLab VERSION 3.0.0 LANGUAGES C CXX)
+project(PointerLab VERSION 3.1.0 LANGUAGES C CXX)
 
 # The C++ standard is deliberately NOT set globally. Keystone vendors a
 # C++14-era LLVM fork that uses std::unary_function and std::iterator, both
