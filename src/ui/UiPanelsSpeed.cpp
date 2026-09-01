@@ -34,7 +34,15 @@ void UiApp::renderSpeedPanel() {
     ImGui::Begin("Speed and Export", &showSpeed_);
 
     const bool attached = services_.session().attached();
-    const auto status = services_.speed().status();
+    // Polled four times a second rather than every frame: reading the status
+    // is four ReadProcessMemory calls, and the payload's state only changes
+    // when something here asks it to.
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastSpeedPoll_ > std::chrono::milliseconds(250)) {
+        lastSpeedPoll_ = now;
+        speedStatus_ = services_.speed().status();
+    }
+    const auto status = speedStatus_;
 
     statusPill(status.running ? "HOOKED" : (status.loaded ? "LOADED" : "OFF"),
                status.running ? colorFromBytes(30, 111, 96) : colorFromBytes(63, 75, 88));
@@ -60,20 +68,31 @@ void UiApp::renderSpeedPanel() {
     if (status.loaded && status.hookedImports == 0 && status.running) {
         // The honest failure, and the one that would otherwise look like the
         // feature not working for no reason.
-        ImGui::TextColored(colorFromBytes(214, 154, 70), "%s",
-                           "The payload is running but found nothing to redirect. This target does not call "
+        ImGui::PushStyleColor(ImGuiCol_Text, colorFromBytes(214, 154, 70));
+        ImGui::TextWrapped("The payload is running but found nothing to redirect. This target does not call "
                            "the timing functions through its import table -- it resolves them at runtime, or "
                            "it uses a clock this hook does not cover.");
+        ImGui::PopStyleColor();
     }
 
     ImGui::Separator();
 
+    // Every change re-reads the status straight away rather than waiting for
+    // the next poll, so the slider never shows a stale number for a quarter of
+    // a second after the user moves it.
+    const auto applyScale = [this](double scale) {
+        if (auto set = services_.speed().setScale(scale); !set) {
+            notifyError(set.error());
+            return false;
+        }
+        speedStatus_ = services_.speed().status();
+        return true;
+    };
+
     ImGui::BeginDisabled(!attached);
     for (const auto& preset : presets) {
         if (ImGui::SmallButton(preset.label)) {
-            if (auto set = services_.speed().setScale(preset.scale); !set) {
-                notifyError(set.error());
-            } else {
+            if (applyScale(preset.scale)) {
                 speedScale_ = static_cast<float>(preset.scale);
                 notifyInfo(std::string("Speed set to ") + preset.label + ".");
             }
@@ -86,17 +105,25 @@ void UiApp::renderSpeedPanel() {
     ImGui::SliderFloat("##speed", &speedScale_, static_cast<float>(engine_speed::SpeedController::minScale),
                        static_cast<float>(engine_speed::SpeedController::maxScale), "%.2fx",
                        ImGuiSliderFlags_Logarithmic);
+    // Applied on release, so the slider behaves like the preset buttons beside
+    // it rather than needing a separate press the labels do not mention. The
+    // Apply button stays for anyone who has learned to reach for it.
+    const bool sliderReleased = ImGui::IsItemDeactivatedAfterEdit();
+    const bool sliderHeld = ImGui::IsItemActive();
     ImGui::SameLine();
-    if (ImGui::Button("Apply")) {
-        if (auto set = services_.speed().setScale(static_cast<double>(speedScale_)); !set) {
-            notifyError(set.error());
-        }
+    if (ImGui::Button("Apply") || sliderReleased) {
+        applyScale(static_cast<double>(speedScale_));
+    }
+    // Seeded from what is actually applied, except while being dragged: the
+    // number on the slider used to keep whatever it was last set to even after
+    // a preset or a script changed the real speed.
+    if (speedStatus_.loaded && !sliderHeld && !sliderReleased) {
+        speedScale_ = static_cast<float>(speedStatus_.applied);
     }
     ImGui::SameLine();
     if (ImGui::Button("Normal")) {
-        speedScale_ = 1.0f;
-        if (auto set = services_.speed().setScale(1.0); !set) {
-            notifyError(set.error());
+        if (applyScale(1.0)) {
+            speedScale_ = 1.0f;
         }
     }
     ImGui::EndDisabled();
@@ -112,6 +139,7 @@ void UiApp::renderSpeedPanel() {
                                   notifyError(reset.error());
                               } else {
                                   speedScale_ = 1.0f;
+                                  speedStatus_ = services_.speed().status();
                                   notifyInfo("The clocks are back to normal.");
                               }
                           });
@@ -141,7 +169,7 @@ void UiApp::renderSpeedPanel() {
         }
     }
 
-    ImGui::SetNextItemWidth(200.0f);
+    ImGui::SetNextItemWidth(scaled(200.0f));
     ImGui::InputTextWithHint("##trainer-name", "trainer name", trainerName_.data(), trainerName_.size());
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-120.0f);

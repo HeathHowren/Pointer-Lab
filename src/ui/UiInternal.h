@@ -20,9 +20,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
-#include <iomanip>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -97,19 +96,49 @@ inline domain::ValueType valueTypeFromIndex(int index) {
 }
 
 inline std::string formatSize(std::size_t size) {
-    std::ostringstream out;
+    // snprintf rather than a stringstream: the regions table calls this once
+    // per visible row per frame.
+    char buffer[32];
     if (size > 1024 * 1024) {
-        out << (size / (1024 * 1024)) << " MB";
+        std::snprintf(buffer, sizeof(buffer), "%llu MB", static_cast<unsigned long long>(size / (1024 * 1024)));
     } else if (size > 1024) {
-        out << (size / 1024) << " KB";
+        std::snprintf(buffer, sizeof(buffer), "%llu KB", static_cast<unsigned long long>(size / 1024));
     } else {
-        out << size << " B";
+        std::snprintf(buffer, sizeof(buffer), "%llu B", static_cast<unsigned long long>(size));
     }
-    return out.str();
+    return buffer;
 }
 
 inline ImVec4 colorFromBytes(int r, int g, int b, int a = 255) {
     return ImVec4(r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f);
+}
+
+// Every fixed width in this UI was picked by eye at 96 DPI. ImGui scales the
+// font and the style metrics for a high-DPI monitor but knows nothing about a
+// column width a panel passed it, so those go through here: without it, a 150%
+// display draws a wider "0x00007FF7A2B41000" into the same 140 pixels.
+inline float scaled(float pixels) {
+    return pixels * ImGui::GetStyle().FontScaleDpi;
+}
+
+// How wide an input plus its trailing label comes out.
+inline float labeledWidth(float itemWidth, const char* label) {
+    return itemWidth + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(label).x;
+}
+
+// SameLine, but only while an item that wide still fits on the current line.
+// Panels dock to whatever width the layout gives them, and a fixed chain of
+// SameLine calls simply runs a control row off the right edge -- there is no
+// scrollbar on a window's own contents, so what fell off could not be reached
+// at all.
+inline void sameLineIfRoom(float width) {
+    // Called just after an item, so the cursor is already at the start of the
+    // next line: its x plus the remaining width is the content region's right
+    // edge, which is what the previous item has to be measured against.
+    const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    if (ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + width < right) {
+        ImGui::SameLine();
+    }
 }
 
 inline void statusPill(const char* label, const ImVec4& color) {
@@ -125,6 +154,19 @@ inline void statusPill(const char* label, const ImVec4& color) {
 inline void helpMarker(const char* text) {
     ImGui::TextDisabled("(?)");
     if (ImGui::BeginItemTooltip()) {
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
+        ImGui::TextUnformatted(text);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+
+// For a table cell whose text can be wider than its column: the column clips
+// the text in place, and the full string is a hover away instead of lost.
+inline void cellText(const char* text) {
+    const float avail = ImGui::GetContentRegionAvail().x;
+    ImGui::TextUnformatted(text);
+    if (ImGui::CalcTextSize(text).x > avail && ImGui::BeginItemTooltip()) {
         ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
         ImGui::TextUnformatted(text);
         ImGui::PopTextWrapPos();

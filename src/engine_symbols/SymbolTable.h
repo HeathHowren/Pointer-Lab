@@ -69,6 +69,12 @@ public:
     // exactly, else `module.dll+0x1234` when it is inside a loaded module, else
     // empty. Never invents a name for a heap address.
     [[nodiscard]] std::string describe(domain::TargetSession& session, std::uintptr_t address) const;
+    // The same, against a module list the caller already has. For a loop that
+    // describes many addresses at once: the overload above copies the module
+    // vector under a lock for every call, which for a structure with twenty
+    // pointer fields over four instances is eighty copies per frame.
+    [[nodiscard]] std::string describe(const std::vector<domain::ModuleInfo>& modules,
+                                       std::uintptr_t address) const;
 
     // True when the address is inside a loaded module's image. Such an address
     // is at the same module+offset in every run, which is exactly what makes it

@@ -41,6 +41,10 @@ public:
 
     [[nodiscard]] LuaScanProgress progress() const;
     [[nodiscard]] std::vector<domain::ScanResult> results() const;
+    [[nodiscard]] std::size_t resultCount() const;
+    // The [first, first + count) window. Same reasoning as ScanJob: a table
+    // drawing a screenful must not copy a million results to do it.
+    [[nodiscard]] std::vector<domain::ScanResult> copyRange(std::size_t first, std::size_t count) const;
     [[nodiscard]] domain::ValueType valueType() const { return valueType_; }
 
 private:

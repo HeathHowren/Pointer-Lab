@@ -5,10 +5,9 @@
 #include <algorithm>
 #include <charconv>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
-#include <iomanip>
 #include <iterator>
-#include <sstream>
 #include <stdexcept>
 
 namespace ire::domain {
@@ -214,21 +213,27 @@ std::vector<ValueType> valueTypes() {
     };
 }
 
+// snprintf rather than a stringstream: every table row in the UI formats an
+// address or two per frame, and constructing a stream costs more than the
+// conversion itself.
 std::string toHex(std::uintptr_t value) {
-    std::ostringstream out;
-    out << "0x" << std::hex << std::uppercase << value;
-    return out.str();
+    char buffer[2 + sizeof(value) * 2 + 1];
+    std::snprintf(buffer, sizeof(buffer), "0x%llX", static_cast<unsigned long long>(value));
+    return buffer;
 }
 
 std::string bytesToHex(const std::vector<std::uint8_t>& bytes, bool spaces) {
-    std::ostringstream out;
+    static constexpr char digits[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(bytes.size() * 3);
     for (std::size_t i = 0; i < bytes.size(); ++i) {
         if (spaces && i != 0) {
-            out << ' ';
+            out.push_back(' ');
         }
-        out << std::hex << std::uppercase << std::setw(2) << std::setfill('0') << static_cast<int>(bytes[i]);
+        out.push_back(digits[bytes[i] >> 4]);
+        out.push_back(digits[bytes[i] & 0xF]);
     }
-    return out.str();
+    return out;
 }
 
 std::vector<std::uint8_t> parseHexBytes(const std::string& text) {
@@ -244,9 +249,7 @@ std::vector<std::uint8_t> parseHexBytes(const std::string& text) {
     std::vector<std::uint8_t> bytes;
     for (std::size_t i = 0; i + 1 < hex.size(); i += 2) {
         unsigned int value{};
-        std::stringstream ss;
-        ss << std::hex << hex.substr(i, 2);
-        ss >> value;
+        std::from_chars(hex.data() + i, hex.data() + i + 2, value, 16);
         bytes.push_back(static_cast<std::uint8_t>(value));
     }
     return bytes;
@@ -375,18 +378,29 @@ std::optional<ScanValue> parseScanValue(ValueType type, const std::string& text)
 }
 
 std::string formatValue(ValueType type, const std::vector<std::uint8_t>& bytes) {
-    std::ostringstream out;
+    // Same performance constraint as toHex: this runs once per visible row per
+    // frame. to_chars for integers; %g for floats, which prints exactly what
+    // the ostream default (precision 6, general form) used to.
+    char buffer[64];
+    const auto integer = [&buffer](auto v) {
+        const auto result = std::to_chars(buffer, buffer + sizeof(buffer), v);
+        return std::string(buffer, result.ptr);
+    };
+    const auto floating = [&buffer](double v) {
+        std::snprintf(buffer, sizeof(buffer), "%g", v);
+        return std::string(buffer);
+    };
     switch (type) {
-    case ValueType::Int8: if (auto v = readValue<std::int8_t>(bytes)) out << static_cast<int>(*v); break;
-    case ValueType::UInt8: if (auto v = readValue<std::uint8_t>(bytes)) out << static_cast<unsigned int>(*v); break;
-    case ValueType::Int16: if (auto v = readValue<std::int16_t>(bytes)) out << *v; break;
-    case ValueType::UInt16: if (auto v = readValue<std::uint16_t>(bytes)) out << *v; break;
-    case ValueType::Int32: if (auto v = readValue<std::int32_t>(bytes)) out << *v; break;
-    case ValueType::UInt32: if (auto v = readValue<std::uint32_t>(bytes)) out << *v; break;
-    case ValueType::Int64: if (auto v = readValue<std::int64_t>(bytes)) out << *v; break;
-    case ValueType::UInt64: if (auto v = readValue<std::uint64_t>(bytes)) out << *v; break;
-    case ValueType::Float: if (auto v = readValue<float>(bytes)) out << *v; break;
-    case ValueType::Double: if (auto v = readValue<double>(bytes)) out << *v; break;
+    case ValueType::Int8: if (auto v = readValue<std::int8_t>(bytes)) return integer(static_cast<int>(*v)); break;
+    case ValueType::UInt8: if (auto v = readValue<std::uint8_t>(bytes)) return integer(static_cast<unsigned int>(*v)); break;
+    case ValueType::Int16: if (auto v = readValue<std::int16_t>(bytes)) return integer(*v); break;
+    case ValueType::UInt16: if (auto v = readValue<std::uint16_t>(bytes)) return integer(*v); break;
+    case ValueType::Int32: if (auto v = readValue<std::int32_t>(bytes)) return integer(*v); break;
+    case ValueType::UInt32: if (auto v = readValue<std::uint32_t>(bytes)) return integer(*v); break;
+    case ValueType::Int64: if (auto v = readValue<std::int64_t>(bytes)) return integer(*v); break;
+    case ValueType::UInt64: if (auto v = readValue<std::uint64_t>(bytes)) return integer(*v); break;
+    case ValueType::Float: if (auto v = readValue<float>(bytes)) return floating(*v); break;
+    case ValueType::Double: if (auto v = readValue<double>(bytes)) return floating(*v); break;
     case ValueType::Bytes: return bytesToHex(bytes);
     case ValueType::StringAscii: {
         std::string text;
@@ -411,7 +425,8 @@ std::string formatValue(ValueType type, const std::vector<std::uint8_t>& bytes) 
         return text;
     }
     }
-    return out.str();
+    // A buffer too short for the type formats as empty rather than as garbage.
+    return {};
 }
 
 std::wstring widen(const std::string& text) {

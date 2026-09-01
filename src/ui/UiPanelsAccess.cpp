@@ -98,16 +98,27 @@ void UiApp::renderAccessWatchPanel() {
 
     ImGui::Separator();
 
+    // The site whose register dump is expanded gets rendered after the table
+    // so the interpretation column has the full panel width rather than being
+    // clipped inside the narrow Disassembly cell.
+    const engine_debug::AccessSite* expanded = nullptr;
     if (ImGui::BeginTable("access-sites", 4, denseTableFlags)) {
-        ImGui::TableSetupColumn("Hits", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableSetupColumn("Instruction", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+        ImGui::TableSetupColumn("Hits", ImGuiTableColumnFlags_WidthFixed, scaled(60.0f));
+        ImGui::TableSetupColumn("Instruction", ImGuiTableColumnFlags_WidthFixed, scaled(140.0f));
         ImGui::TableSetupColumn("Disassembly", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 210.0f);
+        // 300 rather than 210: the row carries four SmallButtons and the last
+        // two ("NOP", "Script") used to be culled by ItemAdd when the cell
+        // clipped, so they were invisible and unclickable.
+        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, scaled(300.0f));
         ImGui::TableHeadersRow();
 
         for (const auto& site : sites) {
             ImGui::TableNextRow();
-            ImGui::PushID(static_cast<int>(site.trapAddress));
+            // A 64-bit trap address truncated to int made two sites that differ
+            // only above bit 31 -- a module in high memory and an allocation in
+            // low memory happen to be a common pair -- share widget state, so
+            // opening the script menu on one popped it up on the other.
+            ImGui::PushID(reinterpret_cast<const void*>(site.trapAddress));
 
             ImGui::TableNextColumn();
             ImGui::Text("%llu", static_cast<unsigned long long>(site.hitCount));
@@ -133,7 +144,7 @@ void UiApp::renderAccessWatchPanel() {
             ImGui::PopFont();
 
             ImGui::TableNextColumn();
-            if (ImGui::SmallButton("More information")) {
+            if (ImGui::SmallButton("Registers")) {
                 accessWatchDetail_ = accessWatchDetail_ == site.trapAddress ? 0 : site.trapAddress;
             }
             ImGui::SameLine();
@@ -176,12 +187,20 @@ void UiApp::renderAccessWatchPanel() {
             ImGui::EndDisabled();
 
             if (accessWatchDetail_ == site.trapAddress) {
-                renderAccessWatchDetail(site);
+                expanded = &site;
             }
 
             ImGui::PopID();
         }
         ImGui::EndTable();
+    }
+
+    if (expanded != nullptr) {
+        // Rendered outside the table so the register interpretation gets the
+        // full panel width; inside, it lived in the "Disassembly" cell and
+        // the "points 0xF8 into a structure base" text -- the reason this
+        // panel exists -- was clipped exactly where it became useful.
+        renderAccessWatchDetail(*expanded);
     }
 
     ImGui::End();
@@ -223,11 +242,7 @@ void UiApp::confirmNopInstruction(std::uintptr_t address, std::size_t length, co
 }
 
 void UiApp::renderAccessWatchDetail(const engine_debug::AccessSite& site) {
-    ImGui::TableNextRow();
-    ImGui::TableNextColumn();
-    ImGui::TableNextColumn();
-    ImGui::TableNextColumn();
-
+    ImGui::Separator();
     ImGui::PushFont(monoFont_, monoFont_->LegacySize);
     ImGui::TextDisabled("thread %u, trap reported at %s", site.lastContext.threadId,
                         domain::toHex(site.trapAddress).c_str());
@@ -235,7 +250,12 @@ void UiApp::renderAccessWatchDetail(const engine_debug::AccessSite& site) {
     // The reason this panel exists. Reading "EDI+0xF8" off a register here is
     // how a reader gets from "I found my health" to "I found the player
     // structure", which is the whole of Ch09's and Ch12's method.
-    for (const auto& meaning : services_.accessWatch().explain(site.lastContext)) {
+    if (explainCacheSite_ != site.trapAddress || explainCacheHits_ != site.hitCount) {
+        explainCacheSite_ = site.trapAddress;
+        explainCacheHits_ = site.hitCount;
+        explainCache_ = services_.accessWatch().explain(site.lastContext);
+    }
+    for (const auto& meaning : explainCache_) {
         const bool structBase = meaning.interpretation.find("structure base") != std::string::npos;
         if (structBase) {
             ImGui::TextColored(colorFromBytes(120, 200, 140), "%-3s %016llX  %s", meaning.name.c_str(),
@@ -249,7 +269,6 @@ void UiApp::renderAccessWatchDetail(const engine_debug::AccessSite& site) {
         }
     }
     ImGui::PopFont();
-    ImGui::TableNextColumn();
 }
 
 } // namespace ire::ui

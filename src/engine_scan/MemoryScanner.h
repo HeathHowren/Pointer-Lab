@@ -46,7 +46,15 @@ public:
     void cancel();
 
     [[nodiscard]] ScanProgress progress() const;
+    // The whole set. Callers that only draw a screenful must not use this: a
+    // ScanResult holds three vectors, so copying a million of them costs three
+    // million allocations -- and it does so while holding the lock the worker
+    // needs to append its next batch, which is the UI throttling the scan.
     [[nodiscard]] std::vector<domain::ScanResult> results() const;
+    [[nodiscard]] std::size_t resultCount() const;
+    // The [first, first + count) window, clamped to what exists. This is what
+    // a table with a clipper wants.
+    [[nodiscard]] std::vector<domain::ScanResult> copyRange(std::size_t first, std::size_t count) const;
     [[nodiscard]] domain::ValueType valueType() const { return valueType_; }
 
 private:

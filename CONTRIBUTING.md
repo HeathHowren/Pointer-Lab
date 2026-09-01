@@ -42,6 +42,15 @@ ctest --test-dir build -C Release --output-on-failure
    through the status/toast channel, not only the log.
 5. **Confirm destructive actions.** Anything that allocates in, injects into,
    patches, or detaches from a live process needs a confirmation step.
+
+   There is exactly one exception, and it is worth knowing about before you trip
+   over it: the MCP server does not confirm anything. Starting it is the consent,
+   and it covers every call that follows — a per-call prompt an agent hits every
+   few seconds is one a person learns to click through, which is worse than no
+   prompt because it looks like a control. That trade is only defensible while
+   the warning before the Start button stays as blunt as it is, so treat that
+   text as part of the feature. Do not extend the exception to anything else, and
+   do not add a tool to the registry that has no equivalent path through the UI.
 6. **Keep claims honest.** If a feature only handles part of a problem, say so
    in the UI and the README. We would rather ship a small true claim than a
    large false one.

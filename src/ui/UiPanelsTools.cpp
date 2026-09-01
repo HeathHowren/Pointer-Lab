@@ -10,17 +10,17 @@ namespace ire::ui {
 
 void UiApp::renderPointerPanel() {
     ImGui::Begin("Pointer Scanner", &showPointerScanner_);
-    ImGui::SetNextItemWidth(220.0f);
+    ImGui::SetNextItemWidth(scaled(220.0f));
     ImGui::InputTextWithHint("Target address", "0x7FF... or a symbol", pointerTarget_.data(), pointerTarget_.size());
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(100.0f);
+    sameLineIfRoom(labeledWidth(scaled(100.0f), "Max depth"));
+    ImGui::SetNextItemWidth(scaled(100.0f));
     ImGui::InputInt("Max depth", &pointerDepth_);
     pointerDepth_ = std::clamp(pointerDepth_, 1, 8);
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(120.0f);
+    sameLineIfRoom(labeledWidth(scaled(120.0f), "Max offset"));
+    ImGui::SetNextItemWidth(scaled(120.0f));
     ImGui::InputText("Max offset", pointerMaxOffset_.data(), pointerMaxOffset_.size());
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(118.0f);
+    sameLineIfRoom(labeledWidth(scaled(118.0f), "Value type"));
+    ImGui::SetNextItemWidth(scaled(118.0f));
     const auto typeNames = valueTypeNames();
     ImGui::Combo("Value type", &pointerTypeIndex_, typeNames.data(), static_cast<int>(typeNames.size()));
 
@@ -69,13 +69,30 @@ void UiApp::renderPointerPanel() {
     ImGui::TextDisabled(
         "Adding a chain tracks it as module+offset, so it re-resolves itself when the target restarts.");
 
-    if (ImGui::BeginTable("pointer-results", 5, denseTableFlags | ImGuiTableFlags_ScrollY, ImVec2(0, 0))) {
-        ImGui::TableSetupColumn("Module", ImGuiTableColumnFlags_WidthFixed, 150.0f);
-        ImGui::TableSetupColumn("Base", ImGuiTableColumnFlags_WidthFixed, 170.0f);
+    // ScrollX because the panel docks narrow: five fixed columns of addresses
+    // do not fit, and without it the last two are simply gone.
+    if (ImGui::BeginTable("pointer-results", 5,
+                          denseTableFlags | ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX,
+                          ImVec2(0, 0))) {
+        ImGui::TableSetupColumn("Module", ImGuiTableColumnFlags_WidthFixed, scaled(150.0f));
+        ImGui::TableSetupColumn("Base", ImGuiTableColumnFlags_WidthFixed, scaled(170.0f));
         ImGui::TableSetupColumn("Offsets", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableSetupColumn("Resolves to", ImGuiTableColumnFlags_WidthFixed, 130.0f);
-        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+        ImGui::TableSetupColumn("Resolves to", ImGuiTableColumnFlags_WidthFixed, scaled(130.0f));
+        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, scaled(90.0f));
         ImGui::TableHeadersRow();
+
+        // Chain resolution is throttled to five times a second and only for the
+        // rows actually on screen; the cache is dropped whenever the result set
+        // changes so a new scan never shows the previous one's addresses.
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (chains.size() != pointerResolvedFor_ ||
+                now - lastPointerResolve_ > std::chrono::milliseconds(200)) {
+                lastPointerResolve_ = now;
+                pointerResolvedFor_ = chains.size();
+                pointerResolved_.clear();
+            }
+        }
 
         ImGuiListClipper clipper;
         clipper.Begin(static_cast<int>(chains.size()));
@@ -92,23 +109,32 @@ void UiApp::renderPointerPanel() {
                 ImGui::Text("%s+%s", domain::narrow(chain.moduleName).c_str(),
                             domain::toHex(chain.moduleOffset).c_str());
                 ImGui::TableNextColumn();
-                std::ostringstream offsets;
+                std::string offsets;
                 for (std::size_t i = 0; i < chain.offsets.size(); ++i) {
                     if (i != 0) {
-                        offsets << ", ";
+                        offsets += ", ";
                     }
-                    offsets << "0x" << std::hex << chain.offsets[i];
+                    offsets += chain.offsets[i] < 0
+                                   ? "-" + domain::toHex(static_cast<std::uintptr_t>(-chain.offsets[i]))
+                                   : domain::toHex(static_cast<std::uintptr_t>(chain.offsets[i]));
                 }
-                ImGui::TextUnformatted(offsets.str().c_str());
+                ImGui::TextUnformatted(offsets.c_str());
                 ImGui::TableNextColumn();
-                if (auto resolved = engine_pointer::resolveChain(services_.session(), chain)) {
-                    ImGui::TextUnformatted(domain::toHex(resolved.value()).c_str());
-                } else {
+                auto cached = pointerResolved_.find(row);
+                if (cached == pointerResolved_.end()) {
+                    auto resolved = engine_pointer::resolveChain(services_.session(), chain);
+                    cached = pointerResolved_
+                                 .emplace(row, resolved ? domain::toHex(resolved.value()) : std::string())
+                                 .first;
+                }
+                if (cached->second.empty()) {
                     ImGui::TextDisabled("unresolved");
+                } else {
+                    ImGui::TextUnformatted(cached->second.c_str());
                 }
                 ImGui::TableNextColumn();
                 if (ImGui::SmallButton("Add")) {
-                    const auto type = domain::valueTypes()[static_cast<std::size_t>(pointerTypeIndex_)];
+                    const auto type = valueTypeFromIndex(pointerTypeIndex_);
                     services_.addressList().addChain(chain, type,
                                                      domain::narrow(chain.moduleName) + "+" +
                                                          domain::toHex(chain.moduleOffset),
@@ -213,39 +239,56 @@ void UiApp::renderLuaScannerPanel() {
     ImGui::Begin("Lua Scanner", &showLuaScanner_);
     const auto typeNames = valueTypeNames();
 
-    ImGui::BeginChild("lua-scan-controls", ImVec2(0, 140.0f), true);
-    statusPill(services_.luaScanJob().progress().running ? "RUNNING" : "READY",
-        services_.luaScanJob().progress().running ? colorFromBytes(51, 94, 120) : colorFromBytes(63, 75, 88));
+    ImGui::BeginChild("lua-scan-controls", ImVec2(0, 0),
+                      ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+    const auto luaProgress = services_.luaScanJob().progress();
+    statusPill(luaProgress.running ? "RUNNING" : "READY",
+        luaProgress.running ? colorFromBytes(51, 94, 120) : colorFromBytes(63, 75, 88));
     ImGui::SameLine();
-    ImGui::TextDisabled("Return a Lua predicate: function(ctx) -> truthy to keep the address.");
+    if (!luaProgress.error.empty()) {
+        // Errors used to live only on the Results tab, so the person who
+        // pressed Start from the Predicate tab saw nothing when their script
+        // failed to compile.
+        ImGui::TextColored(colorFromBytes(235, 116, 91), "%s", luaProgress.error.c_str());
+    } else {
+        ImGui::TextDisabled("Return a Lua predicate: function(ctx) -> truthy to keep the address.");
+    }
     ImGui::SameLine();
     helpMarker("ctx fields: address, value, bytes, hex, type, region_base, region_size. Example: return function(ctx) return ctx.value and ctx.value % 16 == 0 end");
     ImGui::Separator();
 
-    ImGui::SetNextItemWidth(118.0f);
+    ImGui::SetNextItemWidth(scaled(118.0f));
     ImGui::Combo("Type", &luaScanTypeIndex_, typeNames.data(), static_cast<int>(typeNames.size()));
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(100.0f);
+    sameLineIfRoom(labeledWidth(scaled(100.0f), "Stride"));
+    ImGui::SetNextItemWidth(scaled(100.0f));
     ImGui::InputInt("Stride", &luaScanStride_);
     luaScanStride_ = std::clamp(luaScanStride_, 0, 4096);
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(130.0f);
+    sameLineIfRoom(labeledWidth(scaled(130.0f), "Max results"));
+    ImGui::SetNextItemWidth(scaled(130.0f));
     ImGui::InputInt("Max results", &luaScanMaxResults_);
     luaScanMaxResults_ = std::clamp(luaScanMaxResults_, 1, 1000000);
 
     ImGui::Checkbox("Writable only", &luaScanWritableOnly_);
-    ImGui::SameLine();
+    sameLineIfRoom(labeledWidth(ImGui::GetFrameHeight(), "Executable only"));
     ImGui::Checkbox("Executable only", &luaScanExecutableOnly_);
-    ImGui::SameLine();
+    sameLineIfRoom(labeledWidth(0.0f, "Start Lua scan") + ImGui::GetStyle().FramePadding.x * 2.0f);
     if (ImGui::Button("Start Lua scan")) {
-        scripting::LuaScanOptions options;
-        options.type = valueTypeFromIndex(luaScanTypeIndex_);
-        options.script = luaScanScript_.data();
-        options.stride = static_cast<std::size_t>(luaScanStride_);
-        options.maxResults = static_cast<std::size_t>(luaScanMaxResults_);
-        options.writableOnly = luaScanWritableOnly_;
-        options.executableOnly = luaScanExecutableOnly_;
-        services_.luaScanJob().start(std::move(options));
+        if (!services_.session().attached()) {
+            // LuaScanJob::start does not check attached() and would iterate an
+            // empty regions list, finishing with "0 Lua matches" on the tab
+            // next door -- looking exactly like a successful scan that found
+            // nothing.
+            notifyError("Attach to a process first.");
+        } else {
+            scripting::LuaScanOptions options;
+            options.type = valueTypeFromIndex(luaScanTypeIndex_);
+            options.script = luaScanScript_.data();
+            options.stride = static_cast<std::size_t>(luaScanStride_);
+            options.maxResults = static_cast<std::size_t>(luaScanMaxResults_);
+            options.writableOnly = luaScanWritableOnly_;
+            options.executableOnly = luaScanExecutableOnly_;
+            services_.luaScanJob().start(std::move(options));
+        }
     }
     ImGui::SameLine();
     if (ImGui::Button("Cancel")) {
@@ -267,33 +310,51 @@ void UiApp::renderLuaScannerPanel() {
                 ImGui::TextDisabled("%zu Lua match%s", progress.results, progress.results == 1 ? "" : "es");
             }
 
-            const auto results = services_.luaScanJob().results();
+            // The count, not the whole vector: same reasoning as the Scanner's
+            // own results table, and the limit here allows a million too.
+            const auto resultCount = services_.luaScanJob().resultCount();
             const auto type = services_.luaScanJob().valueType();
             if (ImGui::BeginTable("lua-scan-results", 4, denseTableFlags | ImGuiTableFlags_ScrollY, ImVec2(0, 0))) {
+                ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableSetupColumn("Address");
                 ImGui::TableSetupColumn("Value");
                 ImGui::TableSetupColumn("Bytes");
                 ImGui::TableSetupColumn("Action");
                 ImGui::TableHeadersRow();
-                for (std::size_t i = 0; i < results.size(); ++i) {
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(domain::toHex(results[i].address).c_str());
-                    ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(domain::formatValue(type, results[i].current).c_str());
-                    ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(domain::bytesToHex(results[i].current).c_str());
-                    ImGui::TableNextColumn();
-                    ImGui::PushID(static_cast<int>(i));
-                    if (ImGui::SmallButton("Add")) {
-                        services_.addressList().add(results[i].address, type, "Lua scan result", "Lua Scanner");
+                // Clipped like the Scanner's own results table: the limit
+                // allows a million matches and formatting every one of them
+                // per frame turned this tab into a slideshow.
+                ImGuiListClipper clipper;
+                clipper.Begin(static_cast<int>(resultCount));
+                while (clipper.Step()) {
+                    const auto first = static_cast<std::size_t>(clipper.DisplayStart);
+                    const auto window = services_.luaScanJob().copyRange(
+                        first, static_cast<std::size_t>(clipper.DisplayEnd - clipper.DisplayStart));
+                    for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                        const auto index = static_cast<std::size_t>(row) - first;
+                        if (index >= window.size()) {
+                            break;
+                        }
+                        const auto& result = window[index];
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(domain::toHex(result.address).c_str());
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(domain::formatValue(type, result.current).c_str());
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(domain::bytesToHex(result.current).c_str());
+                        ImGui::TableNextColumn();
+                        ImGui::PushID(row);
+                        if (ImGui::SmallButton("Add")) {
+                            services_.addressList().add(result.address, type, "Lua scan result", "Lua Scanner");
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("View")) {
+                            gotoMemory(result.address);
+                            copyText(disasmAddress_.data(), disasmAddress_.size(), domain::toHex(result.address));
+                        }
+                        ImGui::PopID();
                     }
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("View")) {
-                        gotoMemory(results[i].address);
-                        copyText(disasmAddress_.data(), disasmAddress_.size(), domain::toHex(results[i].address));
-                    }
-                    ImGui::PopID();
                 }
                 ImGui::EndTable();
             }
@@ -385,10 +446,18 @@ void UiApp::renderLogPanel() {
     auto& logger = infra::Logger::instance();
     static const char* levelNames[] = {"trace", "info", "warn", "error"};
     int level = static_cast<int>(logger.minimumLevel());
-    ImGui::SetNextItemWidth(110.0f);
-    if (ImGui::Combo("Level", &level, levelNames, IM_ARRAYSIZE(levelNames))) {
+    ImGui::SetNextItemWidth(scaled(110.0f));
+    // "Capture level", not "Level": this decides what is *written*, so raising
+    // it does not hide lines already captured and lowering it cannot bring
+    // back lines never captured. Labelled as a view filter it looked broken in
+    // both directions.
+    if (ImGui::Combo("Capture level", &level, levelNames, IM_ARRAYSIZE(levelNames))) {
         logger.setMinimumLevel(static_cast<infra::LogLevel>(level));
     }
+    ImGui::SameLine();
+    helpMarker("Records below this level are never written. Changing it does not hide lines already "
+               "captured, and cannot recover lines that were skipped -- use the filter box to narrow "
+               "what is on screen.");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::InputTextWithHint("##logfilter", "filter", logFilter_.data(), logFilter_.size());
@@ -404,25 +473,56 @@ void UiApp::renderLogPanel() {
         ShellExecuteW(nullptr, L"open", folder.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("%s", logger.path().string().c_str());
+    // The full path ran off the right edge of the panel; it is a hover away
+    // instead.
+    ImGui::TextDisabled("Log file");
+    if (ImGui::BeginItemTooltip()) {
+        ImGui::TextUnformatted(logger.path().string().c_str());
+        ImGui::EndTooltip();
+    }
 
-    const std::string filter = logFilter_.data();
+    // Lowercased once, like every other filter in the app: the log filter was
+    // the only case-sensitive one, so "Attach" and "attach" gave different
+    // results for no stated reason.
+    std::string filter = logFilter_.data();
+    std::transform(filter.begin(), filter.end(), filter.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     const auto records = logger.snapshot();
+
+    // Matching rows are collected first so the clipper has a stable count.
+    // Without a clipper this loop laid out up to five thousand rows every
+    // frame, and did it while holding nothing back from the scan worker that
+    // is writing to the same logger.
+    std::vector<const infra::LogRecord*> visible;
+    visible.reserve(records.size());
+    for (const auto& record : records) {
+        if (!filter.empty()) {
+            std::string haystack = record.message;
+            std::transform(haystack.begin(), haystack.end(), haystack.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (haystack.find(filter) == std::string::npos) {
+                continue;
+            }
+        }
+        visible.push_back(&record);
+    }
 
     ImGui::BeginChild("log-scroll", ImVec2(0, 0), true);
     ImGui::PushFont(monoFont_, monoFont_->LegacySize);
-    for (const auto& record : records) {
-        if (!filter.empty() && record.message.find(filter) == std::string::npos) {
-            continue;
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(visible.size()));
+    while (clipper.Step()) {
+        for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+            const auto& record = *visible[static_cast<std::size_t>(row)];
+            ImVec4 colour = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+            if (record.level == infra::LogLevel::Error) {
+                colour = colorFromBytes(235, 116, 91);
+            } else if (record.level == infra::LogLevel::Warning) {
+                colour = colorFromBytes(232, 184, 92);
+            }
+            ImGui::TextColored(colour, "[%5u] [%s] %s", record.threadId,
+                               infra::Logger::levelName(record.level), record.message.c_str());
         }
-        ImVec4 colour = ImGui::GetStyleColorVec4(ImGuiCol_Text);
-        if (record.level == infra::LogLevel::Error) {
-            colour = colorFromBytes(235, 116, 91);
-        } else if (record.level == infra::LogLevel::Warning) {
-            colour = colorFromBytes(232, 184, 92);
-        }
-        ImGui::TextColored(colour, "[%5u] [%s] %s", record.threadId,
-                           infra::Logger::levelName(record.level), record.message.c_str());
     }
     ImGui::PopFont();
     if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {

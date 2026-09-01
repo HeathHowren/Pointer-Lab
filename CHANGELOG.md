@@ -3,6 +3,87 @@
 All notable changes to Pointer Lab are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **An MCP server, so an AI agent can drive a session.** 76 tools over the
+  [Model Context Protocol](https://modelcontextprotocol.io) — attach, scan,
+  read and write memory, resolve symbols and pointer chains, dissect structures,
+  disassemble and assemble, set breakpoints, run the access watch, patch code,
+  allocate and inject, drive the speed hack, save and load projects, and move
+  the window. Documented per tool in [docs/mcp-api.md](docs/mcp-api.md).
+
+  It runs **inside the application**, holding the same `RuntimeServices` the
+  window does, which is the whole point of it. A process the agent attaches to is
+  the one on screen; a scan it starts fills the Scanner panel and can be watched
+  running; an address it finds appears in the address list a frame later. The
+  alternative — a separate headless process — gives an agent its own private
+  session and leaves the person next to it with no way to see what happened. This
+  way there is one session, and the MCP panel's request log says what was done to
+  it.
+
+  Off until you start it, in **View → MCP Server**. `--mcp [port]` starts it at
+  launch for someone who runs Pointer Lab in order to hand it to an agent. The
+  panel hands over a ready-made `claude mcp add` command, because assembling the
+  bearer-token header by hand is where this goes wrong.
+
+  **The tool names are frozen for the life of 3.x**, joining the panel titles,
+  menu paths and Lua function names. They are added after 3.0.0 shipped and so
+  fall outside the letter of that promise, which is why this says so explicitly:
+  a tool name is what an agent's prompt and a saved workflow are written against,
+  and that is the case the promise exists for. Where a tool does the same job as
+  a Lua function it carries the same name, so the two surfaces can be read as one
+  vocabulary rather than two.
+
+- **`UiCommands` can now run arbitrary work on the UI thread.**
+  `runOnUiThread`, `saveProject` and `loadProject` join the existing window
+  commands, over the same request queue Lua automation already used. This is what
+  keeps the UI thread the single mutator of engine state while tool calls arrive
+  on a socket thread, and it is available to any future automation surface rather
+  than being private to MCP.
+
+### Security
+
+Read this before starting the server.
+
+**Starting it is the only thing you will be asked.** Everywhere else in Pointer
+Lab, anything that allocates in, injects into, patches or detaches from a live
+process asks first. The MCP server does not. While it is running, a client
+holding the token can read and write the target's memory, patch its code, set
+breakpoints, allocate, load a DLL into it and start threads in it, with no
+further confirmation. The decision is made once, at Start, and it covers
+everything that follows.
+
+This is a deliberate departure from this project's own rule that destructive
+actions are confirmed. An agent that has to stop for a dialog every few calls is
+not usable for the work this is for, and a confirmation prompt that a person
+learns to click through is worse than no prompt at all — it looks like a control
+and functions as a delay. So the consent is moved to one place where it is
+actually read, rather than spread over a hundred places where it would not be.
+
+What that is worth relies on the rest being true, so: the server binds
+`127.0.0.1` and nothing else, and requires a bearer token — 32 hex characters
+from `BCryptGenRandom`, regenerated on every start, never written to disk,
+compared in constant time. Every request is logged to the panel and to
+`engine.log`. That is access control over the transport. It decides *who* may
+call, not *what* they may do, and it is not a substitute for the confirmations
+it replaces.
+
+Two consequences that are easy to miss:
+
+- Nothing an agent does is undone when it disconnects. Patches stay applied,
+  allocations stay allocated, injected libraries stay loaded, frozen values stay
+  frozen.
+- The server is not stopped by detaching, by loading a project, or by the target
+  exiting. Stop it when you are done.
+
+### Changed
+
+- `saveProjectTo` and `loadProjectFrom` return `infra::Result<void>` rather than
+  `bool`, so a caller that is not the UI — an MCP tool, a script — gets the same
+  sentence the toast shows instead of having to invent one.
+
 ## [3.0.0] — 2026-08-25
 
 The release that makes Pointer Lab a complete tool rather than a capable one:
@@ -451,6 +532,91 @@ marked as new in this changelog after 3.0.0 ships.
   so the chain still resolves, to the wrong field.
 
 ### Fixed
+
+- **Typing a value into the address-list editor and pressing Apply changed
+  nothing in the target until freeze was toggled.** Apply stored the value as
+  the entry's freeze value and stopped there, and the freeze loop only writes
+  entries that are frozen — so on an unfrozen entry the number sat in the list
+  looking applied while the target still held the old one. Apply (and Add) now
+  write the value to the target immediately, the same way the row's Write
+  button does, and report the failure if the write does not land.
+
+- **Pointer Lab now scales to the display it is on.** `resources/app.manifest`
+  has declared per-monitor-v2 DPI awareness since 1.0, which is a promise to
+  Windows that the application will do its own scaling — and nothing did. On a
+  150% display every control was laid out at 96 DPI, so the window opened two
+  thirds the intended size with text drawn at full size inside it, and dragging
+  it to a second monitor at a different scale changed nothing. Fonts and window
+  rectangles now follow the monitor, the style metrics are rebuilt at the new
+  scale on `WM_DPICHANGED`, and the fixed widths inside panels — table columns,
+  combo boxes, the hex viewer's ASCII gutter — scale with them.
+
+  The style is rebuilt from its unscaled values on every change rather than
+  scaled in place: 5 pixels of padding truncates to 6 at 125%, and scaling that
+  back down does not return 5, so two trips across a monitor boundary left the
+  layout visibly drifted.
+
+- **Editors kept state from the row you were last looking at.** Several panels
+  held a selection and a set of buffers that could disagree with each other:
+
+  - The Address List editor kept its contents after Add or Apply, so a second
+    click added a duplicate entry — and, since Apply now writes, wrote the value
+    again. Editing a pointer-chain entry and unticking Pointer left the chain
+    attached, so the background resolver rewrote the address back within the
+    frame and the row stayed unresolved forever. Editing one that stayed a chain
+    dropped its frozen state on the way through.
+  - The Structure Dissector applied a field edit to whichever structure was
+    selected *now* rather than the one the offset was read from, and the name box
+    kept the previous structure's name after New, Remove, or an automatic
+    reselection.
+  - The Scripts panel let a script be enabled while the editor held unsaved
+    changes, which ran the saved source rather than the one on screen — the
+    checkbox is disabled until the edits are saved and says so. Switching scripts
+    or applying a template over unsaved work now asks first, and New creates a
+    script called "New script" rather than a row with no visible name.
+
+- **Controls that were clipped, unreachable, or lying.** The address editor and
+  the scan controls sat in fixed-height boxes that cut off their own buttons as
+  soon as a warning appeared inside them; they size to their contents now. The
+  "Region filters" header vanished entirely when its View toggle was off. Two
+  of the four buttons on an Access Watch row were culled by the table before
+  they could be clicked. The Memory Viewer's navigation row ran off the edge of
+  a docked panel, and its hex editor claimed the keyboard every frame it was
+  open, so typing anywhere else in the application went to it instead. Long
+  module names, paths, symbols and patch bytes were truncated with no way to see
+  the rest; they now show the full text on hover. Warnings, the results legend
+  and the Help window wrap instead of running off the panel.
+
+- **Actions that silently did nothing.** Starting a Lua scan with no process
+  attached reported progress and found nothing rather than saying to attach
+  first. Attaching to a second process while already attached swapped the handle
+  underneath the patches, breakpoints and scripts belonging to the first, so
+  unticking a patch wrote its original bytes into the *new* process at the same
+  address; it now goes through the same confirmation and detach the Detach button
+  does. Dissecting a ninth address reported success and discarded it. A
+  confirmation dialog raised while one was already open replaced it under the
+  reader. Two access sites whose addresses differ only above bit 31 shared widget
+  state, so opening a menu on one opened it on the other. The status pills went
+  on reading CONNECTED and WATCHING after the target had exited — Pointer Lab now
+  notices within a second and detaches.
+
+- **The interface did work proportional to the target on every frame.** Panels
+  were rebuilding their whole contents 60 times a second regardless of how much
+  of it was on screen: Memory Regions laid out every one of a real target's tens
+  of thousands of rows, the scan results table copied the entire result set out
+  from under the scan worker's lock — up to a million entries, each holding three
+  vectors — and the Structure Dissector copied and sorted every region in the
+  target once per frame, per field, to decide whether a value looked like a
+  pointer. Reads of the target were on the same footing: the Address List read
+  every entry's current value, the Patches panel re-read every patch to check for
+  drift, and typing a name like `kernel32.LoadLibraryW` into an address box
+  re-parsed that module's export directory on every keystroke and every frame
+  after it.
+
+  The large tables now draw only their visible rows and fetch only that range,
+  target reads are refreshed on a timer rather than per frame, and everything
+  derived from the module and region lists is cached until an attach, refresh or
+  detach can actually have changed it.
 
 - **An uncaught C++ exception left a crash dump behind and a crash log saying
   none had been written.** `MiniDumpWriteDump` was walking the stack of the very

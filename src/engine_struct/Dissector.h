@@ -6,6 +6,7 @@
 #include "infra/Result.h"
 
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -114,6 +115,18 @@ private:
     mutable std::mutex mutex_;
     std::vector<domain::Structure> structures_;
     std::uint64_t nextId_{1};
+
+    // The sorted committed-region ranges the pointer heuristic searches, kept
+    // between frames. Building it copies and sorts every region in the target
+    // -- tens of thousands of them -- and read() runs every frame the panel is
+    // open. The generation it was built at is the only thing that can
+    // invalidate it, because only attach/refresh/detach change the regions.
+    struct RegionCache;
+    // Handed out by value so a caller keeps the index alive even if another
+    // thread swaps in a rebuilt one behind it.
+    [[nodiscard]] std::shared_ptr<const RegionCache> cachedRegions() const;
+    mutable std::mutex regionMutex_;
+    mutable std::shared_ptr<const RegionCache> regionCache_;
 };
 
 // True when these four or eight bytes read as a number a person would plausibly

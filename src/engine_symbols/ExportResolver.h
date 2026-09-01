@@ -4,6 +4,8 @@
 #include "infra/Result.h"
 
 #include <cstdint>
+#include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -49,6 +51,16 @@ public:
     // Looks a loaded module up by name, case-insensitively and tolerating a
     // missing ".dll". Returns 0 when it is not loaded in the target.
     [[nodiscard]] static std::uintptr_t moduleBase(domain::TargetSession& session, const std::wstring& moduleName);
+
+private:
+    // Parsing one export directory costs a read per named export -- around
+    // fifteen hundred of them for kernel32. That is affordable once and
+    // ruinous per frame, and an address box that names an export resolves on
+    // every frame it is on screen. The cache is dropped whenever the module
+    // table changes, which is the only time a module's exports can move.
+    mutable std::mutex cacheMutex_;
+    mutable std::uint64_t cacheGeneration_{};
+    mutable std::map<std::uintptr_t, std::vector<ExportEntry>> cache_;
 };
 
 } // namespace ire::engine_symbols

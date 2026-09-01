@@ -32,7 +32,13 @@ higher one.
                       domain/  ·  infra/
 ```
 
-`scripting/` sits alongside the engines: it drives them, and is driven by the UI.
+`scripting/` and `mcp/` sit beside each other one level *below* the UI and one
+*above* `services/`: each holds a `RuntimeServices&` and drives it, and each is
+started and stopped by the UI. Neither is an engine, which is why neither is
+named `engine_`. They are the two automation surfaces, and they are deliberately
+peers — a tool that exists in one and not the other is an inconsistency to fix
+rather than a design.
+
 `storage/` depends only on `domain` and `infra`.
 
 `engine_aa` is the one engine that borrows others — the assembler, the patch
@@ -444,6 +450,50 @@ callbacks arriving on the pump thread into a queue the UI drains each frame, rat
 limited to one notification per 500 ms so a breakpoint in a hot loop cannot
 flood the interface. The hit count is not rate limited.
 
+### `mcp/` — the engines as tools an agent can call
+
+Four pieces, smallest first. `McpHttp` parses a request and formats a response —
+pure functions over strings, so the header limits, the token comparison and the
+malformed cases are unit tested without a socket. `McpServer` owns the Winsock
+lifetime and the accept loop, and is the only part that touches a handle.
+`McpProtocol` is JSON-RPC 2.0 and the MCP methods. `McpTools` is the registry:
+76 tools, each a description, a JSON Schema and a lambda over `RuntimeServices`.
+
+Three decisions are load-bearing.
+
+**It binds `127.0.0.1` and nothing else, and it requires a bearer token.** The
+token is 32 hex characters from `BCryptGenRandom`, regenerated on every start,
+never written to disk, and compared in constant time. That is access control
+over the transport; it is not a check on what a caller may then do, and the
+documentation says so rather than implying otherwise.
+
+**Every tool that mutates engine state is marshalled onto the UI thread**, via
+`UiCommands::runOnUiThread` over the same request queue `automationRequest`
+already used for Lua. The UI thread stays the single mutator, so a tool call and
+a click cannot race. Read-only tools run on the server thread against the
+existing mutex-guarded snapshots. With no window — tests, and only tests — the
+marshalling is skipped and the server's own serialisation is what orders the
+calls.
+
+Two consequences worth stating, because both were bugs before they were rules:
+
+- A tool that *already* marshals internally is registered as non-mutating. The
+  project and window tools go through `UiCommands` themselves; marking them
+  mutating would queue a request from the UI thread onto the UI thread and hang
+  the application. `submitRequest` now detects that case and fails loudly rather
+  than deadlocking, which is the difference between a bad edit and a frozen
+  window.
+- `UiApp`'s destructor stops the server **before** clearing the global
+  `UiCommands`. In the other order, a call already in flight would find no
+  window, conclude it was headless, and run inline against engines being
+  destroyed around it.
+
+**Arguments are validated before the session is checked.** A wrong value type
+reported as "No target process is attached" sends the caller off to fix the
+wrong thing — and an agent, unlike a person, will do exactly that, repeatedly.
+Address *resolution* is the deliberate exception: it genuinely needs a session,
+and there "attach first" is the true answer.
+
 ### `ui/UiApp` — Dear ImGui over DX11
 
 One class, panel-per-method, across several translation units grouped by area. It
@@ -459,6 +509,7 @@ owns the Win32 window, the D3D11 device and the ImGui context, and holds
 | `UiPanelsScan.cpp` | Scanner and address list |
 | `UiPanelsMemory.cpp` | Hex viewer, disassembly, breakpoints |
 | `UiPanelsTools.cpp` | Pointer scanner, injection, Lua scanner and console, log |
+| `UiPanelsMcp.cpp` | The MCP server: start/stop, address and token, request log |
 | `UiProject.cpp` | Project files, session autosave, settings |
 | `UiWindows.cpp` | About and Help |
 
@@ -485,6 +536,7 @@ Two conventions matter here:
 | Pointer scan worker | One `PointerScanJob` run |
 | Debug pump | Every debug API call, for the pump's whole lifetime |
 | Lua worker | One script execution |
+| MCP accept loop | One HTTP request at a time, start to finish |
 
 Everything crossing a thread boundary does so through a mutex-guarded snapshot
 (`progress()`, `results()`, `snapshot()`, `takeEvents()`, `takeOutput()`) rather
@@ -500,7 +552,12 @@ All fetched and built by CMake, all statically linked, all pinned:
 | Zydis | Disassembly | MIT |
 | Keystone | Assembly | **GPLv2** |
 | Lua 5.4.7 | Scripting | MIT |
+| nlohmann/json 3.11.3 | MCP's JSON-RPC messages | MIT |
 | Catch2 | Tests | BSL-1.0 |
+
+Two system libraries beyond the usual: `ws2_32` for the MCP server's loopback
+socket, and `bcrypt` for its session token, which comes from `BCryptGenRandom`
+rather than from anything seeded by the clock.
 
 Keystone is why the binary is GPLv2. It also vendors a C++14-era LLVM fork that
 does not compile as C++20 (`std::unary_function`, `std::iterator`), which is why

@@ -7,6 +7,21 @@
 
 namespace ire::ui {
 
+void UiApp::resetAddressEditor() {
+    // Constructor defaults: description and group get the seed values UiApp
+    // starts with (UiApp.cpp), every other field goes blank. editEntryId_
+    // becomes 0 so the header flips back to "Manual add" and Cancel is hidden.
+    addAddress_.fill('\0');
+    addValue_.fill('\0');
+    addHotkey_.fill('\0');
+    addPointerOffsets_.fill('\0');
+    addAsPointer_ = false;
+    addTypeIndex_ = 4;
+    editEntryId_ = 0;
+    copyText(addDescription_.data(), addDescription_.size(), "Manual entry");
+    copyText(addGroup_.data(), addGroup_.size(), "Default");
+}
+
 namespace {
 
 // "10, 8, 0x1C" or "+10 +8 +1C" or "10 -4". Hexadecimal throughout, like every
@@ -100,7 +115,11 @@ void UiApp::renderScanPanel() {
     const bool wantsValue = domain::modeUsesValue(mode);
     const bool supported = engine_scan::modeSupportsType(mode, type);
 
-    ImGui::BeginChild("scan-controls", ImVec2(0, supported ? 132.0f : 152.0f), true);
+    // AutoResizeY rather than a hardcoded height: the child used to clip the
+    // "Ignore case" checkbox and the region filters at their default font
+    // size, and a font bump made the clip worse.
+    ImGui::BeginChild("scan-controls", ImVec2(0, 0),
+                      ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
     ImGui::TextDisabled("Scan setup");
     ImGui::SameLine();
     helpMarker("Use Unknown initial for broad baselines, then Changed/Unchanged/Increased/Decreased to narrow.\n\n"
@@ -109,10 +128,15 @@ void UiApp::renderScanPanel() {
                "Same as first scan compares against the very first scan of the run rather than the previous one, "
                "which is how you find a value that changed and came back.");
     ImGui::Separator();
-    ImGui::SetNextItemWidth(118.0f);
+    // Wide enough to show the longest label ("u64 (unsigned long long)")
+    // rather than clipping the preview at "u64 (unsig".
+    const float typeComboWidth =
+        ImGui::CalcTextSize("u64 (unsigned long long)").x + ImGui::GetFrameHeight() +
+        ImGui::GetStyle().FramePadding.x * 2.0f;
+    ImGui::SetNextItemWidth(typeComboWidth);
     ImGui::Combo("Type", &scanTypeIndex_, typeNames.data(), static_cast<int>(typeNames.size()));
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(170.0f);
+    ImGui::SetNextItemWidth(scaled(170.0f));
     ImGui::Combo("Mode", &scanModeIndex_, modeNames.data(), static_cast<int>(modeNames.size()));
     ImGui::SameLine();
     ImGui::BeginDisabled(!wantsValue);
@@ -146,13 +170,18 @@ void UiApp::renderScanPanel() {
                    "in a Windows game are stored that way, so try wstr when str finds nothing.");
     }
 
-    if (showScannerFilters_ || ImGui::TreeNodeEx("Region filters", ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_SpanAvailWidth)) {
+    // The View menu's "Show scan filters" only forces the tree open -- it does
+    // not short-circuit the widget the way the old code did, which threw the
+    // "Region filters" header away and left two unlabelled checkboxes floating
+    // under the value row.
+    if (showScannerFilters_) {
+        ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+    }
+    if (ImGui::TreeNodeEx("Region filters", ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_SpanAvailWidth)) {
         ImGui::Checkbox("Writable only", &scanWritableOnly_);
         ImGui::SameLine();
         ImGui::Checkbox("Executable only", &scanExecutableOnly_);
-        if (!showScannerFilters_) {
-            ImGui::TreePop();
-        }
+        ImGui::TreePop();
     }
     ImGui::EndChild();
 
@@ -240,18 +269,22 @@ void UiApp::renderScanPanel() {
         }
     }
     ImGui::SameLine();
+    // Enabled only during a live scan: an always-on Cancel button suggests
+    // there is something to stop when there is not.
+    ImGui::BeginDisabled(!services_.scanJob().progress().running);
     if (ImGui::Button("Cancel")) {
         services_.scanJob().cancel();
     }
+    ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(130.0f);
+    ImGui::SetNextItemWidth(scaled(130.0f));
     ImGui::InputInt("Result limit", &scanMaxResults_, 0, 0);
     scanMaxResults_ = std::clamp(scanMaxResults_, 1000, 20000000);
     ImGui::SameLine();
     helpMarker("Scanning stops once this many results are found. Unknown-initial scans of a large "
                "process can exceed it easily; narrow with region filters or raise the limit.");
     if (type == domain::ValueType::Float || type == domain::ValueType::Double) {
-        ImGui::SetNextItemWidth(130.0f);
+        ImGui::SetNextItemWidth(scaled(130.0f));
         ImGui::InputFloat("Float tolerance", &scanFloatEpsilon_, 0.0f, 0.0f, "%.5f");
         scanFloatEpsilon_ = std::clamp(scanFloatEpsilon_, 0.0f, 1000.0f);
         ImGui::SameLine();
@@ -268,24 +301,38 @@ void UiApp::renderScanPanel() {
         ImGui::PopStyleColor();
     }
 
-    auto results = services_.scanJob().results();
+    // The count, not the results. Copying the whole vector here cost three
+    // allocations per result -- three million of them for a scan at the
+    // default cap -- every frame, and it did so under the mutex the scan
+    // worker needs to append its next batch, so the UI was actively slowing
+    // the scan down as results accumulated. The visible window is copied
+    // inside the clipper below instead.
+    const std::size_t totalResults = services_.scanJob().resultCount();
     constexpr std::size_t displayLimit = 10000;
-    const std::size_t count = std::min<std::size_t>(results.size(), displayLimit);
-    if (results.size() > displayLimit) {
+    const std::size_t count = std::min<std::size_t>(totalResults, displayLimit);
+    if (totalResults > displayLimit) {
         // Silently showing the first 10,000 of a much larger set read as
         // "these are all the results".
         ImGui::TextDisabled("Showing the first %zu of %zu results. Narrow the scan to see the rest.",
-                            count, results.size());
+                            count, totalResults);
     } else {
-        ImGui::TextDisabled("%zu result%s", results.size(), results.size() == 1 ? "" : "s");
+        ImGui::TextDisabled("%zu result%s", totalResults, totalResults == 1 ? "" : "s");
     }
+    // Its own line, wrapping to whatever width the Scanner ended up at: the
+    // old inline chain of SameLine() calls ran the whole sentence past ~1300
+    // pixels and clipped it off in every default layout.
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(" -- ");
     ImGui::SameLine();
-    ImGui::TextDisabled(" -- ");
-    ImGui::SameLine();
+    ImGui::PopStyleColor();
     ImGui::TextColored(staticAddressColor(), "green");
     ImGui::SameLine();
-    ImGui::TextDisabled("is a static address: it sits inside a loaded module, so it is at the same "
-                        "module+offset every run.");
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("is a static address: it sits inside a loaded module, so it is at the same "
+                       "module+offset every run.");
+    ImGui::PopStyleColor();
+    ImGui::PopTextWrapPos();
 
     // Snapshotted once for the whole table rather than looked up per row. The
     // clipper keeps the row count small, but session.modules() copies a vector
@@ -307,59 +354,67 @@ void UiApp::renderScanPanel() {
         ImGui::TableHeadersRow();
 
         // Only the visible rows are laid out; formatting 10,000 rows every
-        // frame was a large amount of pointless work.
+        // frame was a large amount of pointless work. The rows themselves are
+        // copied out of the job one screenful at a time.
         ImGuiListClipper clipper;
         clipper.Begin(static_cast<int>(count));
         while (clipper.Step()) {
+            const auto first = static_cast<std::size_t>(clipper.DisplayStart);
+            const auto window = services_.scanJob().copyRange(
+                first, static_cast<std::size_t>(clipper.DisplayEnd - clipper.DisplayStart));
             for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-                const auto i = static_cast<std::size_t>(row);
+                const auto i = static_cast<std::size_t>(row) - first;
+                if (i >= window.size()) {
+                    break;
+                }
+                const auto& result = window[i];
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
-                const auto* module = moduleAt(results[i].address);
+                const auto* module = moduleAt(result.address);
                 if (module != nullptr) {
-                    ImGui::TextColored(staticAddressColor(), "%s", domain::toHex(results[i].address).c_str());
+                    ImGui::TextColored(staticAddressColor(), "%s", domain::toHex(result.address).c_str());
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("%s+%s\n\nStatic: inside a loaded module, so this address is the same "
                                           "offset from that module in every run.",
                                           domain::narrow(module->name).c_str(),
-                                          domain::toHex(results[i].address - module->base).c_str());
+                                          domain::toHex(result.address - module->base).c_str());
                     }
                 } else {
-                    ImGui::TextUnformatted(domain::toHex(results[i].address).c_str());
+                    ImGui::TextUnformatted(domain::toHex(result.address).c_str());
                 }
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted(domain::formatValue(type, results[i].previous).c_str());
+                ImGui::TextUnformatted(domain::formatValue(type, result.previous).c_str());
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted(domain::formatValue(type, results[i].current).c_str());
+                ImGui::TextUnformatted(domain::formatValue(type, result.current).c_str());
                 ImGui::TableNextColumn();
                 ImGui::PushID(row);
                 if (ImGui::SmallButton("Add")) {
-                    services_.addressList().add(results[i].address, type, "Scan result", "Scan");
-                    notifyInfo("Added " + domain::toHex(results[i].address) + " to the address list.");
+                    services_.addressList().add(result.address, type, "Scan result", "Scan");
+                    notifyInfo("Added " + domain::toHex(result.address) + " to the address list.");
                 }
                 ImGui::SameLine();
                 if (ImGui::SmallButton("View")) {
-                    gotoMemory(results[i].address);
-                    copyText(disasmAddress_.data(), disasmAddress_.size(), domain::toHex(results[i].address));
+                    gotoMemory(result.address);
+                    copyText(disasmAddress_.data(), disasmAddress_.size(), domain::toHex(result.address));
                 }
                 ImGui::SameLine();
                 if (ImGui::SmallButton("Find...")) {
                     ImGui::OpenPopup("##find-access-result");
                 }
                 if (ImGui::BeginPopup("##find-access-result")) {
-                    ImGui::TextDisabled("%s", domain::toHex(results[i].address).c_str());
+                    ImGui::TextDisabled("%s", domain::toHex(result.address).c_str());
                     ImGui::Separator();
                     if (ImGui::MenuItem("Find out what writes to this address")) {
-                        beginAccessWatch(results[i].address, type, true);
+                        beginAccessWatch(result.address, type, true);
                     }
                     if (ImGui::MenuItem("Find out what accesses this address")) {
-                        beginAccessWatch(results[i].address, type, false);
+                        beginAccessWatch(result.address, type, false);
                     }
                     ImGui::Separator();
                     // The other direction: not "what touches this value" but
                     // "what is this value part of".
                     if (ImGui::MenuItem("Dissect this")) {
-                        dissect(results[i].address);
+                        dissect(result.address);
                     }
                     ImGui::EndPopup();
                 }
@@ -388,12 +443,19 @@ void UiApp::renderAddressListPanel() {
         editorFlags |= ImGuiTreeNodeFlags_DefaultOpen;
     }
     if (ImGui::CollapsingHeader(editEntryId_ == 0 ? "Manual add / edit" : "Editing selected entry", editorFlags)) {
-        ImGui::BeginChild("address-editor", ImVec2(0, addAsPointer_ ? 178.0f : 126.0f), true);
-        ImGui::SetNextItemWidth(210.0f);
+        // AutoResizeY rather than a hardcoded height: the child used to clip
+        // the Add/Apply button whenever the not-module-rooted warning showed,
+        // which is exactly the state you are in while building a fresh chain.
+        ImGui::BeginChild("address-editor", ImVec2(0, 0),
+                          ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+        ImGui::SetNextItemWidth(scaled(210.0f));
         ImGui::InputTextWithHint(addAsPointer_ ? "Base" : "Address", "0x7FF... or client.dll+0x4A2C10",
                                  addAddress_.data(), addAddress_.size());
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(110.0f);
+        const float editorTypeComboWidth =
+            ImGui::CalcTextSize("u64 (unsigned long long)").x + ImGui::GetFrameHeight() +
+            ImGui::GetStyle().FramePadding.x * 2.0f;
+        ImGui::SetNextItemWidth(editorTypeComboWidth);
         ImGui::Combo("Type", &addTypeIndex_, typeNames.data(), static_cast<int>(typeNames.size()));
         ImGui::SameLine();
         ImGui::Checkbox("Pointer", &addAsPointer_);
@@ -414,13 +476,17 @@ void UiApp::renderAddressListPanel() {
             // Resolved live, because a chain that is one offset wrong resolves
             // to a plausible address and reads a plausible number, and the only
             // way to tell is to look at what it lands on.
-            const auto base = resolveAddress(addAddress_.data());
+            const auto base = resolveAddressCached(addAddress_.data());
             const auto offsets = parseOffsets(addPointerOffsets_.data());
             if (!base) {
                 ImGui::TextDisabled("Enter a base address or a module+offset.");
             } else if (!offsets) {
-                ImGui::TextColored(colorFromBytes(232, 184, 92), "Offsets must be hexadecimal, separated by "
-                                                                 "commas or spaces.");
+                // TextColored does not wrap, so a warning wider than the child
+                // used to disappear off the right edge. Push the colour into
+                // the style and use TextWrapped instead.
+                ImGui::PushStyleColor(ImGuiCol_Text, colorFromBytes(232, 184, 92));
+                ImGui::TextWrapped("Offsets must be hexadecimal, separated by commas or spaces.");
+                ImGui::PopStyleColor();
             } else {
                 const auto chain = chainFrom(services_.session(), *base, *offsets);
                 ImGui::PushFont(monoFont_, monoFont_->LegacySize);
@@ -439,12 +505,15 @@ void UiApp::renderAddressListPanel() {
                             domain::formatValue(valueTypeFromIndex(addTypeIndex_), bytes.value()).c_str());
                     }
                 } else {
-                    ImGui::TextColored(colorFromBytes(232, 184, 92), "%s", resolved.error().c_str());
+                    ImGui::PushStyleColor(ImGuiCol_Text, colorFromBytes(232, 184, 92));
+                    ImGui::TextWrapped("%s", resolved.error().c_str());
+                    ImGui::PopStyleColor();
                 }
                 if (!chain.moduleRooted()) {
-                    ImGui::TextColored(colorFromBytes(232, 184, 92),
-                                       "The base is not inside any loaded module, so this chain will not survive "
-                                       "a restart.");
+                    ImGui::PushStyleColor(ImGuiCol_Text, colorFromBytes(232, 184, 92));
+                    ImGui::TextWrapped("The base is not inside any loaded module, so this chain will "
+                                       "not survive a restart.");
+                    ImGui::PopStyleColor();
                 }
             }
         }
@@ -457,10 +526,27 @@ void UiApp::renderAddressListPanel() {
         ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
         ImGui::InputTextWithHint("Value", "optional freeze/write value", addValue_.data(), addValue_.size());
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(130.0f);
+        ImGui::SetNextItemWidth(scaled(130.0f));
         ImGui::InputTextWithHint("Hotkey", "F1-F12", addHotkey_.data(), addHotkey_.size());
         ImGui::SameLine();
         if (ImGui::Button(editEntryId_ == 0 ? "Add" : "Apply")) {
+            // Also writes the typed value to the target right away: the freeze
+            // loop only writes entries that are frozen, so storing it as the
+            // freeze value alone leaves an unfrozen entry's memory untouched.
+            const auto applyValueAndHotkey = [this](domain::AddressEntry& entry) {
+                entry.hotkey = addHotkey_.data();
+                if (auto value = domain::parseScanValue(entry.type, addValue_.data())) {
+                    entry.frozenValue = std::move(value->bytes);
+                    if (entry.resolved && services_.session().attached()) {
+                        if (auto written = services_.session().writeBytes(entry.address, entry.frozenValue);
+                            !written) {
+                            notifyError("Could not write to " + domain::toHex(entry.address) + ": " +
+                                        written.error());
+                        }
+                    }
+                }
+                services_.session().addressList().update(entry);
+            };
             auto resolved = resolveAddressOrExplain(addAddress_.data());
             if (!resolved) {
                 notifyError(resolved.error());
@@ -473,23 +559,28 @@ void UiApp::renderAddressListPanel() {
                     auto chain = chainFrom(services_.session(), resolved.value(), *offsets);
                     // Removing and re-adding rather than editing in place: an
                     // entry gains and loses its chain here, and the address list
-                    // resolves chains on its own schedule.
+                    // resolves chains on its own schedule. Freeze state carries
+                    // over so editing a frozen chain does not silently thaw it.
+                    bool preservedFrozen = false;
                     if (editEntryId_ != 0) {
+                        for (const auto& existing : services_.session().addressList().snapshot()) {
+                            if (existing.id == editEntryId_) {
+                                preservedFrozen = existing.frozen;
+                                break;
+                            }
+                        }
                         services_.addressList().remove(editEntryId_);
-                        editEntryId_ = 0;
                     }
                     const auto id = services_.addressList().addChain(std::move(chain), type,
                                                                      addDescription_.data(), addGroup_.data());
                     auto updated = services_.session().addressList().snapshot();
                     for (auto& entry : updated) {
                         if (entry.id == id) {
-                            entry.hotkey = addHotkey_.data();
-                            if (auto value = domain::parseScanValue(type, addValue_.data())) {
-                                entry.frozenValue = std::move(value->bytes);
-                            }
-                            services_.session().addressList().update(entry);
+                            entry.frozen = preservedFrozen;
+                            applyValueAndHotkey(entry);
                         }
                     }
+                    resetAddressEditor();
                 }
             } else {
                 const auto address = std::optional<std::uintptr_t>(resolved.value());
@@ -499,13 +590,10 @@ void UiApp::renderAddressListPanel() {
                     auto updated = services_.session().addressList().snapshot();
                     for (auto& entry : updated) {
                         if (entry.id == id) {
-                            entry.hotkey = addHotkey_.data();
-                            if (auto value = domain::parseScanValue(type, addValue_.data())) {
-                                entry.frozenValue = std::move(value->bytes);
-                            }
-                            services_.session().addressList().update(entry);
+                            applyValueAndHotkey(entry);
                         }
                     }
+                    resetAddressEditor();
                 } else {
                     auto updated = services_.session().addressList().snapshot();
                     for (auto& entry : updated) {
@@ -514,22 +602,25 @@ void UiApp::renderAddressListPanel() {
                             entry.type = type;
                             entry.description = addDescription_.data();
                             entry.group = addGroup_.data();
-                            entry.hotkey = addHotkey_.data();
-                            if (auto value = domain::parseScanValue(type, addValue_.data())) {
-                                entry.frozenValue = std::move(value->bytes);
-                            }
-                            services_.session().addressList().update(entry);
-                            editEntryId_ = 0;
+                            // Unticking Pointer during an edit drops the chain:
+                            // otherwise the background re-resolver keeps
+                            // overwriting the address the user just typed, and a
+                            // chain that had stopped resolving would keep the
+                            // row stuck on "unresolved" forever.
+                            entry.chain.reset();
+                            entry.resolved = true;
+                            applyValueAndHotkey(entry);
                             break;
                         }
                     }
+                    resetAddressEditor();
                 }
             }
         }
         if (editEntryId_ != 0) {
             ImGui::SameLine();
             if (ImGui::Button("Cancel")) {
-                editEntryId_ = 0;
+                resetAddressEditor();
             }
         }
         ImGui::EndChild();
@@ -544,7 +635,37 @@ void UiApp::renderAddressListPanel() {
         return module == modules.end() ? nullptr : &*module;
     };
 
+    // Ten times a second, for every entry at once, rather than once per row per
+    // frame. The reads are the expensive part -- each is a ReadProcessMemory
+    // holding the session lock that the freeze thread also needs -- and a value
+    // refreshed at 10 Hz is indistinguishable to the eye from one refreshed at
+    // 60 while costing a sixth as much.
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastCurrentRefresh_ > std::chrono::milliseconds(100)) {
+            lastCurrentRefresh_ = now;
+            currentValues_.clear();
+            const bool attached = services_.session().attached();
+            for (const auto& entry : entries) {
+                std::string current = "<unreadable>";
+                if (entry.chain && !entry.resolved) {
+                    current = "<chain broken>";
+                } else if (attached) {
+                    if (auto bytes = services_.session().readBytes(
+                            entry.address, std::max<std::size_t>(1, domain::valueTypeSize(entry.type)))) {
+                        current = domain::formatValue(entry.type, bytes.value());
+                    }
+                }
+                currentValues_[entry.id] = std::move(current);
+            }
+        }
+    }
+
     if (ImGui::BeginTable("addresses", 8, denseTableFlags | ImGuiTableFlags_ScrollY, ImVec2(0, 0))) {
+        // Freeze the header row so scrolling a long list does not lose the
+        // column labels: the addresses table used to be the only large table
+        // in the app without this.
+        ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("Group");
         ImGui::TableSetupColumn("Description");
         ImGui::TableSetupColumn("Address");
@@ -598,14 +719,9 @@ void UiApp::renderAddressListPanel() {
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(domain::valueTypeName(entry.type));
             ImGui::TableNextColumn();
-            std::string current = "<unreadable>";
-            if (entry.chain && !entry.resolved) {
-                current = "<chain broken>";
-            } else if (services_.session().attached()) {
-                if (auto bytes = services_.session().readBytes(entry.address, std::max<std::size_t>(1, domain::valueTypeSize(entry.type)))) {
-                    current = domain::formatValue(entry.type, bytes.value());
-                }
-            }
+            const auto cached = currentValues_.find(entry.id);
+            const std::string current = cached == currentValues_.end() ? std::string("<unreadable>")
+                                                                       : cached->second;
             ImGui::TextUnformatted(current.c_str());
             ImGui::TableNextColumn();
             ImGui::PushID(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(entry.id)));
@@ -657,12 +773,17 @@ void UiApp::renderAddressListPanel() {
             // one row could store a value meant for a different one.
             if (ImGui::SmallButton("Write")) {
                 rowWriteId_ = entry.id;
-                copyText(rowWriteValue_.data(), rowWriteValue_.size(), current);
+                // Only pre-fill from the current value when it was actually
+                // read: seeding the box with "<unreadable>" made every Write
+                // click on a dead row fail with an "invalid for type" error
+                // before the user had a chance to type anything.
+                const bool readable = current != "<unreadable>" && current != "<chain broken>";
+                copyText(rowWriteValue_.data(), rowWriteValue_.size(), readable ? current : std::string{});
                 ImGui::OpenPopup("##write-value");
             }
             if (ImGui::BeginPopup("##write-value")) {
                 ImGui::TextDisabled("%s at %s", domain::valueTypeName(entry.type), domain::toHex(entry.address).c_str());
-                ImGui::SetNextItemWidth(180.0f);
+                ImGui::SetNextItemWidth(scaled(180.0f));
                 const bool submitted = ImGui::InputText("##value", rowWriteValue_.data(), rowWriteValue_.size(),
                                                         ImGuiInputTextFlags_EnterReturnsTrue);
                 ImGui::SameLine();

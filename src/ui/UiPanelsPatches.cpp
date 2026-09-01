@@ -52,12 +52,29 @@ void UiApp::renderPatchesPanel() {
 
     ImGui::Separator();
 
-    if (ImGui::BeginTable("patches", 5, denseTableFlags)) {
-        ImGui::TableSetupColumn("On", ImGuiTableColumnFlags_WidthFixed, 34.0f);
-        ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 140.0f);
-        ImGui::TableSetupColumn("Replaced", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Bytes", ImGuiTableColumnFlags_WidthFixed, 220.0f);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 130.0f);
+    // Drift is one ReadProcessMemory per patch. Checked three times a second
+    // rather than sixty: code rewriting itself under us is a real thing to
+    // notice, but not one that needs frame-rate resolution.
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastDriftRefresh_ > std::chrono::milliseconds(300)) {
+            lastDriftRefresh_ = now;
+            patchDrift_.clear();
+            for (const auto& patch : patches) {
+                patchDrift_[patch.id] = registry.drifted(patch);
+            }
+        }
+    }
+
+    if (ImGui::BeginTable("patches", 5, denseTableFlags | ImGuiTableFlags_ScrollY)) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("On", ImGuiTableColumnFlags_WidthFixed, scaled(34.0f));
+        ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, scaled(140.0f));
+        // Replaced holds the (short) instruction text; Bytes holds the raw hex
+        // that would have to be typed back by hand, so it deserves the stretch.
+        ImGui::TableSetupColumn("Replaced", ImGuiTableColumnFlags_WidthFixed, scaled(240.0f));
+        ImGui::TableSetupColumn("Bytes", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, scaled(130.0f));
         ImGui::TableHeadersRow();
 
         for (const auto& patch : patches) {
@@ -81,7 +98,8 @@ void UiApp::renderPatchesPanel() {
             // target rewriting its own code, an anti-tamper check, or a write
             // that went around the registry. Silence here would mean the tick
             // box claims a state the memory does not have.
-            if (registry.drifted(patch)) {
+            const auto drift = patchDrift_.find(patch.id);
+            if (drift != patchDrift_.end() && drift->second) {
                 ImGui::SameLine();
                 ImGui::TextColored(colorFromBytes(214, 154, 70), "(!)");
                 if (ImGui::IsItemHovered()) {

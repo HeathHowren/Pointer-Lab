@@ -30,6 +30,18 @@ void UiApp::dissect(std::uintptr_t address) {
     const auto text = domain::toHex(address);
     std::string existing = structureAddresses_.data();
     if (existing.find(text) == std::string::npos) {
+        // A ninth address used to be silently truncated by structureAddressList
+        // while the toast still claimed the addition succeeded: the row was
+        // gone and the reader could not see why.
+        const auto count = structureAddressList().size();
+        if (count >= engine_struct::Dissector::maxAddresses) {
+            showStructures_ = true;
+            ImGui::SetWindowFocus("Structures");
+            notifyError("At most " +
+                        std::to_string(engine_struct::Dissector::maxAddresses) +
+                        " addresses can be compared side by side. Remove one before adding another.");
+            return;
+        }
         if (!existing.empty()) {
             existing += ", ";
         }
@@ -51,7 +63,9 @@ std::vector<std::uintptr_t> UiApp::structureAddressList() {
         if (token.empty()) {
             return;
         }
-        if (const auto address = resolveAddress(token.c_str())) {
+        // Cached: the structures panel calls this every frame, once per
+        // comma-separated address.
+        if (const auto address = resolveAddressCached(token.c_str())) {
             addresses.push_back(*address);
         }
         token.clear();
@@ -84,6 +98,12 @@ void UiApp::renderStructuresPanel() {
     ImGui::SameLine();
     if (ImGui::SmallButton("New")) {
         structureId_ = dissector.add({});
+        // Every field-editor and rename buffer refers to a specific structure;
+        // creating another one leaves them referring to the wrong one.
+        editFieldOffset_.reset();
+        if (const auto created = dissector.find(structureId_)) {
+            copyText(structureName_.data(), structureName_.size(), created->name);
+        }
     }
     ImGui::SameLine();
     helpMarker(
@@ -113,21 +133,29 @@ void UiApp::renderStructuresPanel() {
     ImGui::Separator();
     if (structureId_ == 0 || !dissector.find(structureId_)) {
         structureId_ = structures.front().id;
+        // Same reason as New above: the rename box and field editor pointed at
+        // the structure that just disappeared, and left uncorrected they would
+        // silently target the auto-picked replacement instead.
+        editFieldOffset_.reset();
+        if (const auto fallback = dissector.find(structureId_)) {
+            copyText(structureName_.data(), structureName_.size(), fallback->name);
+        }
     }
     const auto current = dissector.find(structureId_);
-    ImGui::SetNextItemWidth(200.0f);
+    ImGui::SetNextItemWidth(scaled(200.0f));
     if (ImGui::BeginCombo("##structure", current ? current->name.c_str() : "")) {
         for (const auto& structure : structures) {
             const bool selected = structure.id == structureId_;
             if (ImGui::Selectable(structure.name.c_str(), selected)) {
                 structureId_ = structure.id;
+                editFieldOffset_.reset();
                 copyText(structureName_.data(), structureName_.size(), structure.name);
             }
         }
         ImGui::EndCombo();
     }
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(160.0f);
+    ImGui::SetNextItemWidth(scaled(160.0f));
     ImGui::InputTextWithHint("##structure-name", "rename", structureName_.data(), structureName_.size());
     ImGui::SameLine();
     if (ImGui::SmallButton("Rename")) {
@@ -146,6 +174,8 @@ void UiApp::renderStructuresPanel() {
                               notifyError(removed.error());
                           } else {
                               structureId_ = 0;
+                              editFieldOffset_.reset();
+                              structureName_.fill('\0');
                           }
                       });
     }
@@ -155,7 +185,7 @@ void UiApp::renderStructuresPanel() {
     ImGui::InputTextWithHint("##structure-addresses", "addresses, comma separated",
                              structureAddresses_.data(), structureAddresses_.size());
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(80.0f);
+    ImGui::SetNextItemWidth(scaled(80.0f));
     ImGui::InputInt("##structure-size", &structureSize_, 0, 0, ImGuiInputTextFlags_CharsHexadecimal);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("How many bytes of the object to read, in hex.");
@@ -200,8 +230,9 @@ void UiApp::renderStructuresPanel() {
     }
 
     for (const auto index : snapshot.value().unreadable) {
-        ImGui::TextColored(colorFromBytes(214, 154, 70), "%s could not be read.",
-                           domain::toHex(addresses[index]).c_str());
+        ImGui::PushStyleColor(ImGuiCol_Text, colorFromBytes(214, 154, 70));
+        ImGui::TextWrapped("%s could not be read.", domain::toHex(addresses[index]).c_str());
+        ImGui::PopStyleColor();
     }
 
     renderStructureFieldEditor();
@@ -211,9 +242,9 @@ void UiApp::renderStructuresPanel() {
     const int columns = 3 + static_cast<int>(addresses.size());
     if (ImGui::BeginTable("structure", columns, denseTableFlags | ImGuiTableFlags_ScrollY)) {
         ImGui::TableSetupScrollFreeze(3, 1);
-        ImGui::TableSetupColumn("Offset", ImGuiTableColumnFlags_WidthFixed, 64.0f);
-        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 140.0f);
-        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        ImGui::TableSetupColumn("Offset", ImGuiTableColumnFlags_WidthFixed, scaled(64.0f));
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, scaled(140.0f));
+        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, scaled(60.0f));
         for (const auto address : addresses) {
             ImGui::TableSetupColumn(domain::toHex(address).c_str(), ImGuiTableColumnFlags_WidthStretch);
         }
@@ -235,6 +266,17 @@ void UiApp::renderStructuresPanel() {
             ImGui::PopFont();
 
             ImGui::TableNextColumn();
+            // Selectable spans the row so right-click anywhere in it opens the
+            // menu. Before, BeginPopupContextItem hooked whatever the last
+            // submitted item happened to be (the rightmost value cell), so the
+            // Edit / Remove / Watch menu was unreachable from the name cell.
+            ImGui::Selectable(("##row-" + std::to_string(row.field.offset)).c_str(), false,
+                              ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap);
+            if (ImGui::BeginPopupContextItem("##field-menu")) {
+                renderStructureFieldMenu(row.field, addresses);
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
             ImGui::TextUnformatted(row.field.name.c_str());
             if (ImGui::IsItemHovered() && addresses.size() > 1) {
                 ImGui::SetTooltip(row.identical
@@ -264,14 +306,6 @@ void UiApp::renderStructuresPanel() {
                 ImGui::PopStyleColor();
             }
 
-            // The row menu hangs off the name cell's whole row, which is where
-            // people click. Retyping a field is the commonest thing done here,
-            // because the guess is only ever a guess.
-            if (ImGui::BeginPopupContextItem("##field-menu")) {
-                renderStructureFieldMenu(row.field, addresses);
-                ImGui::EndPopup();
-            }
-
             ImGui::PopID();
         }
         ImGui::EndTable();
@@ -289,10 +323,10 @@ void UiApp::renderStructureFieldEditor() {
     ImGui::TextDisabled("Editing +%s",
                         domain::toHex(static_cast<std::uintptr_t>(*editFieldOffset_)).c_str());
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(160.0f);
+    ImGui::SetNextItemWidth(scaled(160.0f));
     ImGui::InputTextWithHint("##field-name", "name", editFieldName_.data(), editFieldName_.size());
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(200.0f);
+    ImGui::SetNextItemWidth(scaled(200.0f));
     const auto typeNames = valueTypeNames();
     ImGui::Combo("##field-type", &editFieldTypeIndex_, typeNames.data(), static_cast<int>(typeNames.size()));
 
@@ -303,7 +337,7 @@ void UiApp::renderStructureFieldEditor() {
     const bool variable = domain::valueTypeSize(type) == 0;
     ImGui::SameLine();
     ImGui::BeginDisabled(!variable);
-    ImGui::SetNextItemWidth(60.0f);
+    ImGui::SetNextItemWidth(scaled(60.0f));
     ImGui::InputInt("##field-length", &editFieldLength_, 0, 0);
     ImGui::EndDisabled();
     if (!variable) {

@@ -22,6 +22,10 @@ public:
     bool update(const AddressEntry& entry);
     bool setFrozen(std::uint64_t id, bool frozen);
     [[nodiscard]] std::vector<AddressEntry> snapshot() const;
+    // Bumped by every change to the list. A caller that only needs to know
+    // whether anything moved can compare this instead of taking a snapshot,
+    // which copies several strings and a chain per entry.
+    [[nodiscard]] std::uint64_t revision() const;
     // Used when loading a project. Ids in the loaded entries are preserved, and
     // the next generated id continues past the highest of them.
     void replace(std::vector<AddressEntry> entries);
@@ -29,6 +33,7 @@ public:
 private:
     mutable std::mutex mutex_;
     std::uint64_t nextId_{1};
+    std::uint64_t revision_{1};
     std::vector<AddressEntry> entries_;
 };
 

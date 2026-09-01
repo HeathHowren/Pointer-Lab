@@ -76,7 +76,26 @@ FetchContent_Declare(
     EXCLUDE_FROM_ALL
 )
 
-FetchContent_MakeAvailable(imgui lua zydis keystone)
+# nlohmann/json: the JSON reader and writer behind the MCP server (MIT).
+# Header-only, and the only dependency here that is not a whole subsystem.
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+set(JSON_Install    OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG 9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03 # v3.11.3
+    EXCLUDE_FROM_ALL
+)
+
+FetchContent_MakeAvailable(imgui lua zydis keystone nlohmann_json)
+
+# Marked SYSTEM so the first-party /W4 /WX does not apply to a 25 000-line
+# header. Third-party warnings are exempt everywhere else in this file by being
+# kept off the pointerlab_warnings target; a header-only library has no target
+# of its own to keep them off, so the exemption has to be spelled out here.
+get_target_property(_pl_json_includes nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
+set_target_properties(nlohmann_json PROPERTIES
+    INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_pl_json_includes}")
 
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -156,6 +175,15 @@ add_library(pointerlab_core STATIC
     src/infra/Logger.cpp
     src/infra/Paths.cpp
     src/infra/Settings.cpp
+    # The MCP tool surface is one registry split by engine group, for the same
+    # reason UiApp is split by panel group: in one file it would be the largest
+    # translation unit in the tree.
+    src/mcp/McpHttp.cpp
+    src/mcp/McpProtocol.cpp
+    src/mcp/McpServer.cpp
+    src/mcp/McpTools.cpp
+    src/mcp/McpToolsAnalysis.cpp
+    src/mcp/McpToolsControl.cpp
     src/platform_win32/Win32Platform.cpp
     src/scripting/LuaConsole.cpp
     src/scripting/LuaScanner.cpp
@@ -179,6 +207,7 @@ set(POINTERLAB_UI_SOURCES
     src/ui/UiPanelsStructures.cpp
     src/ui/UiPanelsSpeed.cpp
     src/ui/UiPanelsAccess.cpp
+    src/ui/UiPanelsMcp.cpp
     src/ui/UiPanelsMemory.cpp
     src/ui/UiPanelsPatches.cpp
     src/ui/UiPanelsTools.cpp
@@ -209,6 +238,7 @@ target_link_libraries(pointerlab_core
         lua54
         Zydis
         keystone
+        nlohmann_json::nlohmann_json
     PRIVATE
         pointerlab_warnings
         d3d11
@@ -218,6 +248,10 @@ target_link_libraries(pointerlab_core
         psapi
         dbghelp
         advapi32
+        # The MCP server's loopback listener, and the system RNG behind its
+        # session token. Nothing else in Pointer Lab opens a socket.
+        ws2_32
+        bcrypt
         # The PNG encoder behind screenshot(). A system component, not a new
         # dependency: a figure has to come out as a real image file, and adding
         # an image library to write one would be out of proportion.
@@ -402,8 +436,12 @@ install(FILES
 
 # The Lua reference and the project-file spec are the two documents someone is
 # most likely to want while using the tool rather than while reading the repo.
+# The MCP reference ships for a stronger reason: it is where the server's "no
+# confirmation once started" posture is written down, and that has to travel
+# with the binary rather than live only in the repository.
 install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/docs/lua-api.md
+    ${CMAKE_CURRENT_SOURCE_DIR}/docs/mcp-api.md
     ${CMAKE_CURRENT_SOURCE_DIR}/docs/iretable-format.md
     ${CMAKE_CURRENT_SOURCE_DIR}/docs/architecture.md
     DESTINATION docs

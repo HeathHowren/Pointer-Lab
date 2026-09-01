@@ -210,6 +210,22 @@ only code that looks at which object is being written to.
   A figure taken by hand is correct on the day and silently wrong afterwards. A
   capture script is re-run on every release, and a panel that has been renamed
   since fails the run instead of quietly disagreeing with its caption.
+- **MCP server** — 76 tools over the
+  [Model Context Protocol](https://modelcontextprotocol.io), so an AI agent can
+  attach, scan, read and write memory, walk pointer chains, dissect structures,
+  set breakpoints and patch code. It runs **inside** the application and shares
+  the live session: a scan the agent starts fills the Scanner panel, and an
+  address it finds appears in the address list. One session with two people at
+  it, rather than an agent working blind alongside you. See
+  [docs/mcp-api.md](docs/mcp-api.md).
+
+  It is **off until you start it** in View → MCP Server, binds `127.0.0.1` only,
+  and requires a per-session bearer token. Read the next sentence before you use
+  it: while the server is running, a client holding that token can read and write
+  the target's memory, patch its code, allocate, inject a DLL and start threads
+  in it **without any of the confirmations the rest of the application asks
+  for**. Pressing Start is the one consent, and it covers everything that
+  follows. Stop the server when you are done.
 - **Persistence** — `.iretable` project format with File → New/Open/Save/Save As,
   plus autosave on exit and autoload on start. Format documented in
   [docs/iretable-format.md](docs/iretable-format.md). Scan options and which
@@ -243,6 +259,10 @@ Stated plainly, because a tool that overstates itself wastes your time:
   that case is visible rather than silent. It also deliberately leaves ntdll,
   kernel32, kernelbase and winmm alone: those implement the clocks, and patching
   them would send the hook's own call to the real function back into the hook.
+- The MCP server is request/response only. There is no event stream, so a client
+  polls `scan_status`, `breakpoint_events` and `access_watch_sites` rather than
+  being told. Its token is transport access control and not a safety check:
+  anything holding it has the same reach over the target that you do.
 - There is no kernel driver, no anti-anti-cheat, and no attempt at stealth.
 
 ## What will not change within a major version
@@ -258,8 +278,16 @@ person who finds out is a reader following an instruction that no longer matches
 what is in front of them. A better name for a panel is not worth that; it can
 wait for a major version, where a changed name is expected and looked for.
 
+**MCP tool names are covered too**, from the release that introduces them. They
+are added after 3.0.0 shipped and so fall outside the rule above, which is
+exactly why this says so explicitly: a tool name is something an agent's prompt
+and a saved workflow are written against, which is the whole reason the promise
+exists. Renaming one would break work already done, in the same way and for the
+same reason as renaming a panel.
+
 Not covered: the arrangement of controls inside a panel, the wording of
-explanatory text, colours, and anything added after a major release ships.
+explanatory text, colours, the JSON *shape* a tool returns beyond the fields
+documented for it, and anything else added after a major release ships.
 
 ## Intended use
 
@@ -286,8 +314,8 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The first configure downloads and builds Dear ImGui, Lua 5.4.7, Zydis, Keystone
-and Catch2 via `FetchContent`, all pinned by tag or commit. Keystone brings the
+The first configure downloads and builds Dear ImGui, Lua 5.4.7, Zydis, Keystone,
+nlohmann/json and Catch2 via `FetchContent`, all pinned by tag or commit. Keystone brings the
 LLVM MC layer with it and dominates the first build; it is cached afterwards.
 
 To produce the release zip:
@@ -300,6 +328,7 @@ cpack --config build/CPackConfig.cmake -C Release -B build/package
 
 - [Architecture](docs/architecture.md) — how the layers fit together
 - [Lua API reference](docs/lua-api.md)
+- [MCP API reference](docs/mcp-api.md) — the tools, and what starting the server commits you to
 - [`.iretable` format](docs/iretable-format.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
