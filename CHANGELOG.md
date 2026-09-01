@@ -3,6 +3,28 @@
 All notable changes to Pointer Lab are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.1.1] — 2026-08-31
+
+No behaviour changes. This exists so the MCP reference that ships beside the
+binary is the corrected one, because the wrong copy of it went out with 3.1.0.
+
+### Fixed
+
+- **`docs/mcp-api.md` described `hex` as always being an address.** That is true
+  of most tools and false of every one that returns data: in `scan_results`,
+  `read_bytes`, `disassemble` and `patches_list`, `hex` is the bytes. A scan row
+  for the value 1000 reads `"hex": "E8030000"`, which is 1000 little-endian and
+  not an address at all, so a reader following the stated rule fed the value
+  where the next call wanted an address.
+
+  Found by writing a script against the document and watching it resolve four
+  different results to the same "address". A person spots that in a second; an
+  agent does not, which is exactly who this reference is written for.
+
+  The tool schemas — what an MCP client actually reads over the wire — were
+  right the whole time, so nothing behaved incorrectly. This was wrong prose
+  about correct behaviour, and only the prose changed.
+
 ## [3.1.0] — 2026-08-31
 
 A minor version, and the reason is that nothing here changes what was already
