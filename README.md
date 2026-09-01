@@ -278,12 +278,12 @@ person who finds out is a reader following an instruction that no longer matches
 what is in front of them. A better name for a panel is not worth that; it can
 wait for a major version, where a changed name is expected and looked for.
 
-**MCP tool names are covered too**, from the release that introduces them. They
-are added after 3.0.0 shipped and so fall outside the rule above, which is
-exactly why this says so explicitly: a tool name is something an agent's prompt
-and a saved workflow are written against, which is the whole reason the promise
-exists. Renaming one would break work already done, in the same way and for the
-same reason as renaming a panel.
+**MCP tool names are covered too**, from 3.1.0 on. They were added after 3.0.0
+shipped and so fall outside the rule above, which is exactly why this says so
+explicitly: a tool name is something an agent's prompt and a saved workflow are
+written against, which is the whole reason the promise exists. Renaming one would
+break work already done, in the same way and for the same reason as renaming a
+panel.
 
 Not covered: the arrangement of controls inside a panel, the wording of
 explanatory text, colours, the JSON *shape* a tool returns beyond the fields

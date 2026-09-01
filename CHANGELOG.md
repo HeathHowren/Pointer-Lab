@@ -3,7 +3,12 @@
 All notable changes to Pointer Lab are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [3.1.0] — 2026-08-31
+
+A minor version, and the reason is that nothing here changes what was already
+there. `.iretable` project files are still **format version 3**, every panel
+title, menu path and Lua function name is where 3.0.0 left it, and a session
+saved by 3.0.0 opens unchanged. What is new is a second way to drive the tool.
 
 ### Added
 
