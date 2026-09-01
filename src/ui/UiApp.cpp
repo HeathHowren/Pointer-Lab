@@ -31,7 +31,11 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 namespace ire::ui {
 
 UiApp::UiApp(HINSTANCE instance, int showCommand)
-    : instance_(instance), showCommand_(showCommand), lua_(services_) {
+    : instance_(instance), showCommand_(showCommand), lua_(services_), mcpServer_(services_) {
+    // The thread that will drain the automation queue, recorded before anything
+    // can submit to it. A request made from this thread would wait for a drain
+    // that cannot run until it returns.
+    uiThreadId_ = std::this_thread::get_id();
     copyText(addDescription_.data(), addDescription_.size(), "Manual entry");
     copyText(addGroup_.data(), addGroup_.size(), "Default");
     copyText(luaScanScript_.data(), luaScanScript_.size(),
@@ -45,6 +49,12 @@ UiApp::UiApp(HINSTANCE instance, int showCommand)
 }
 
 UiApp::~UiApp() {
+    // First of all, and before the seam below is cleared: a tool call in flight
+    // would otherwise find uiCommands() null, decide there is no window to
+    // marshal onto, and run itself inline against engines that are being
+    // destroyed. Stopping the server joins its thread, so by the time this
+    // returns there is no call in flight to worry about.
+    mcpServer_.stop();
     // Before anything is torn down: a script thread blocked on a request must
     // not find a half-destroyed window on the other end of it.
     services::setUiCommands(nullptr);
@@ -80,6 +90,14 @@ int UiApp::run() {
     static std::string iniPath = infra::Paths::layoutFile().string();
     io.IniFilename = iniPath.c_str();
 
+    // resources/app.manifest has declared per-monitor-v2 awareness since 1.0,
+    // which means Windows hands us real pixels and expects us to do the
+    // scaling. Until now nothing did, so every control was laid out at 96 DPI
+    // and the whole window came out roughly two thirds size on a 150% display.
+    io.ConfigDpiScaleFonts = true;
+    io.ConfigDpiScaleViewports = true;
+    dpiScale_ = ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd_);
+
     applyStyle();
 
     ImGui_ImplWin32_Init(hwnd_);
@@ -111,6 +129,22 @@ int UiApp::run() {
             continue;
         }
         render();
+
+        // --mcp, once there is a window to show the token in. Cleared whether or
+        // not it worked, so a refused port is reported once rather than retried
+        // every frame.
+        if (startMcpOnLaunch_) {
+            startMcpOnLaunch_ = false;
+            showMcp_ = true;
+            focusPanel_ = "MCP Server";
+            if (auto started = mcpServer_.start(startupMcpPort_); !started) {
+                notifyError(started.error());
+            } else {
+                mcpPort_ = static_cast<int>(mcpServer_.port());
+                notifyInfo("MCP server listening on " + mcpServer_.url() +
+                           ". The token is in the MCP Server panel.");
+            }
+        }
 
         // --script, submitted after the first frame rather than before it: the
         // script's very first act is usually to size the window and reset the
@@ -176,6 +210,16 @@ LRESULT UiApp::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             createRenderTarget();
         }
         return 0;
+    case WM_DPICHANGED:
+        // Dragged to a display with a different scale. The ImGui backend has
+        // already moved the window to the rect Windows suggested and will
+        // rescale the docked layout; what it does not touch is the style
+        // metrics, so those are rebuilt here at the new scale.
+        if (imguiInitialized_) {
+            dpiScale_ = ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd);
+            applyStyleSizes();
+        }
+        return 0;
     case WM_SYSCOMMAND:
         if ((wParam & 0xfff0) == SC_KEYMENU) {
             return 0;
@@ -225,6 +269,22 @@ bool UiApp::createWindow() {
         reportFatalStartupError(L"Could not create the Pointer Lab main window.");
         return false;
     }
+
+    // 1500x950 is a size in ordinary pixels, which on a 150% display is a
+    // window two thirds the intended size holding text drawn at full size.
+    // Grown to match, but never past the monitor's work area.
+    if (const float scale = ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd_); scale > 1.0f) {
+        auto width = static_cast<LONG>(1500.0f * scale);
+        auto height = static_cast<LONG>(950.0f * scale);
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        if (GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &monitor)) {
+            width = std::min(width, monitor.rcWork.right - monitor.rcWork.left);
+            height = std::min(height, monitor.rcWork.bottom - monitor.rcWork.top);
+        }
+        SetWindowPos(hwnd_, nullptr, 0, 0, width, height, SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE);
+    }
+
     if (!createDeviceD3D(hwnd_)) {
         cleanupDeviceD3D();
         reportFatalStartupError(
@@ -338,6 +398,19 @@ void UiApp::render() {
         luaOutput_.push_back(std::move(line));
     }
 
+    // A handle to a process that has exited stays valid; without this the
+    // status pills would keep saying ATTACHED / WATCHING while every read
+    // failed one at a time. Once a second is more than fast enough -- a
+    // process cannot become alive again between ticks.
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastExitCheck_ > std::chrono::seconds(1)) {
+        lastExitCheck_ = now;
+        if (services_.session().attached() && services_.session().exited()) {
+            notifyError("The target process has exited.");
+            requestDetach();
+        }
+    }
+
     syncGlobalHotkeys();
     handleHotkeys();
     renderMenu();
@@ -368,6 +441,7 @@ void UiApp::render() {
     if (showLuaScanner_)     { renderLuaScannerPanel(); }
     if (showInjection_)      { renderInjectionPanel(); }
     if (showLuaConsole_)     { renderLuaPanel(); }
+    if (showMcp_)            { renderMcpPanel(); }
 
     if (showAbout_) { renderAboutWindow(); }
     if (showHelp_)  { renderHelpWindow(); }
@@ -528,7 +602,7 @@ void UiApp::renderToasts() {
             ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - padding, viewport->WorkPos.y + offsetY),
             ImGuiCond_Always, ImVec2(1.0f, 0.0f));
         ImGui::SetNextWindowBgAlpha(0.92f);
-        ImGui::SetNextWindowSizeConstraints(ImVec2(220.0f, 0.0f), ImVec2(520.0f, FLT_MAX));
+        ImGui::SetNextWindowSizeConstraints(ImVec2(scaled(220.0f), 0.0f), ImVec2(scaled(520.0f), FLT_MAX));
 
         const ImVec4 accent = toast.error ? colorFromBytes(196, 78, 78) : colorFromBytes(46, 138, 116);
         ImGui::PushStyleColor(ImGuiCol_Border, accent);
@@ -555,6 +629,14 @@ void UiApp::renderToasts() {
 }
 
 void UiApp::confirmAction(std::string title, std::string message, std::string confirmLabel, std::function<void()> action) {
+    // A second request queued while one is on screen used to silently replace
+    // it, so the modal read for confirmation A ended up executing action B
+    // when the user pressed the button. Refusing the second one keeps the
+    // one already in front of the user honest.
+    if (pendingConfirm_) {
+        notifyError("Finish the current confirmation before starting another.");
+        return;
+    }
     pendingConfirm_ = PendingConfirm{std::move(title), std::move(message), std::move(confirmLabel), std::move(action), false};
 }
 
@@ -573,7 +655,7 @@ void UiApp::renderConfirmModal() {
         return;
     }
 
-    ImGui::SetNextWindowSizeConstraints(ImVec2(420.0f, 0.0f), ImVec2(640.0f, FLT_MAX));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(scaled(420.0f), 0.0f), ImVec2(scaled(640.0f), FLT_MAX));
     if (ImGui::BeginPopupModal("##confirm", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
         ImGui::PushStyleColor(ImGuiCol_Text, colorFromBytes(232, 184, 92));
         ImGui::TextUnformatted(pendingConfirm_->title.c_str());
@@ -582,9 +664,9 @@ void UiApp::renderConfirmModal() {
         ImGui::PushTextWrapPos(600.0f);
         ImGui::TextUnformatted(pendingConfirm_->message.c_str());
         ImGui::PopTextWrapPos();
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        ImGui::Dummy(ImVec2(0.0f, scaled(6.0f)));
 
-        if (ImGui::Button(pendingConfirm_->confirmLabel.c_str(), ImVec2(180.0f, 0.0f))) {
+        if (ImGui::Button(pendingConfirm_->confirmLabel.c_str(), ImVec2(scaled(180.0f), 0.0f))) {
             // Copy the action out before clearing: it may itself queue another
             // confirmation.
             auto action = pendingConfirm_->action;
@@ -597,7 +679,7 @@ void UiApp::renderConfirmModal() {
             return;
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (ImGui::Button("Cancel", ImVec2(scaled(120.0f), 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             pendingConfirm_.reset();
             ImGui::CloseCurrentPopup();
         }
@@ -605,6 +687,16 @@ void UiApp::renderConfirmModal() {
     }
 }
 void UiApp::syncGlobalHotkeys() {
+    // The revision check comes first, because the snapshot below deep-copies
+    // three strings, a byte vector and an optional chain per entry -- and in
+    // the overwhelmingly common case nothing has changed and every one of
+    // those allocations is thrown away unread.
+    const auto revision = services_.session().addressList().revision();
+    if (revision == hotkeyListRevision_) {
+        return;
+    }
+    hotkeyListRevision_ = revision;
+
     std::set<int> wanted;
     for (const auto& entry : services_.session().addressList().snapshot()) {
         if (auto id = platform_win32::GlobalHotkeys::idFor(entry.hotkey)) {
@@ -646,6 +738,22 @@ void UiApp::handleHotkeys() {
 
 void UiApp::refreshProcesses() {
     processes_ = services_.platform().listProcesses();
+
+    // Narrowed and lowercased once here rather than per row per frame. A
+    // machine with three hundred processes was making six hundred Win32
+    // conversion calls every frame just to draw and filter the same list.
+    processNames_.clear();
+    processNamesLower_.clear();
+    processNames_.reserve(processes_.size());
+    processNamesLower_.reserve(processes_.size());
+    for (const auto& process : processes_) {
+        auto name = domain::narrow(process.name);
+        auto lower = name;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        processNames_.push_back(std::move(name));
+        processNamesLower_.push_back(std::move(lower));
+    }
 }
 
 

@@ -42,6 +42,7 @@ infra::Result<void> TargetSession::attach(std::uint32_t pid) {
         modules_ = platform_.listModules(pid_);
         regions_ = platform_.listMemoryRegions(process_.get());
         readOnly_ = limitedAccess;
+        ++generation_;
     }
 
     infra::Logger::instance().info("Attached to process " + std::to_string(pid) + " (" +
@@ -70,6 +71,7 @@ void TargetSession::detach() {
     processName_.clear();
     modules_.clear();
     regions_.clear();
+    ++generation_;
 }
 
 void TargetSession::refresh() {
@@ -79,6 +81,17 @@ void TargetSession::refresh() {
     }
     modules_ = platform_.listModules(pid_);
     regions_ = platform_.listMemoryRegions(process_.get());
+    ++generation_;
+}
+
+std::uint64_t TargetSession::generation() const {
+    std::scoped_lock lock(mutex_);
+    return generation_;
+}
+
+bool TargetSession::exited() const {
+    std::scoped_lock lock(mutex_);
+    return static_cast<bool>(process_) && WaitForSingleObject(process_.get(), 0) == WAIT_OBJECT_0;
 }
 
 bool TargetSession::attached() const {

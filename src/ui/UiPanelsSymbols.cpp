@@ -21,6 +21,26 @@ std::optional<std::uintptr_t> UiApp::resolveAddress(const char* text) {
     return resolved.value();
 }
 
+std::optional<std::uintptr_t> UiApp::resolveAddressCached(const char* text) {
+    if (text == nullptr || text[0] == '\0') {
+        return std::nullopt;
+    }
+    // Attaching, refreshing and detaching are the only things that can change
+    // what an expression names, and each of them bumps the generation.
+    const auto generation = services_.session().generation();
+    if (generation != resolveCacheGeneration_) {
+        resolveCacheGeneration_ = generation;
+        resolveCache_.clear();
+    }
+    const std::string key = text;
+    if (const auto found = resolveCache_.find(key); found != resolveCache_.end()) {
+        return found->second;
+    }
+    const auto resolved = resolveAddress(text);
+    resolveCache_.emplace(key, resolved);
+    return resolved;
+}
+
 void UiApp::renderSymbolsPanel() {
     ImGui::Begin("Symbols", &showSymbols_);
 
@@ -38,7 +58,7 @@ void UiApp::renderSymbolsPanel() {
         "these, so a value found once can be referred to by name for the rest of the session.");
     ImGui::Spacing();
 
-    ImGui::SetNextItemWidth(160.0f);
+    ImGui::SetNextItemWidth(scaled(160.0f));
     ImGui::InputTextWithHint("##symbol-name", "name", symbolName_.data(), symbolName_.size());
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-90.0f);
@@ -67,23 +87,37 @@ void UiApp::renderSymbolsPanel() {
     }
 
     ImGui::Separator();
-    if (ImGui::BeginTable("symbols", 4, denseTableFlags)) {
-        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 160.0f);
-        ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+    if (ImGui::BeginTable("symbols", 4, denseTableFlags | ImGuiTableFlags_ScrollY)) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, scaled(200.0f));
+        ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, scaled(140.0f));
         ImGui::TableSetupColumn("Definition", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 130.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, scaled(130.0f));
         ImGui::TableHeadersRow();
+
+        // Snapshotted once for the loop; SymbolTable::isStatic used to copy
+        // the modules vector under a lock for every symbol on every frame,
+        // which for a table of fifty was fifty deep copies to answer a question
+        // one modules snapshot could answer for all of them.
+        const auto modules = services_.session().modules();
+        const auto staticFor = [&modules](std::uintptr_t address) {
+            const auto it = std::find_if(modules.begin(), modules.end(),
+                                         [address](const domain::ModuleInfo& m) {
+                                             return address >= m.base && address < m.base + m.size;
+                                         });
+            return it != modules.end();
+        };
 
         for (const auto& symbol : symbols) {
             ImGui::TableNextRow();
             ImGui::PushID(symbol.name.c_str());
 
             ImGui::TableNextColumn();
-            ImGui::TextUnformatted(symbol.name.c_str());
+            cellText(symbol.name.c_str());
 
             ImGui::TableNextColumn();
             ImGui::PushFont(monoFont_, monoFont_->LegacySize);
-            if (engine_symbols::SymbolTable::isStatic(services_.session(), symbol.address)) {
+            if (staticFor(symbol.address)) {
                 ImGui::TextColored(staticAddressColor(), "%s", domain::toHex(symbol.address).c_str());
             } else {
                 ImGui::TextUnformatted(domain::toHex(symbol.address).c_str());
@@ -94,7 +128,7 @@ void UiApp::renderSymbolsPanel() {
             if (symbol.expression.empty()) {
                 ImGui::TextDisabled("(fixed address)");
             } else {
-                ImGui::TextUnformatted(symbol.expression.c_str());
+                cellText(symbol.expression.c_str());
             }
 
             ImGui::TableNextColumn();
@@ -113,7 +147,17 @@ void UiApp::renderSymbolsPanel() {
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("Remove")) {
-                table.undefine(symbol.name);
+                // Symbols are typed into every address box, so silently deleting
+                // one would break references the user cannot see from here.
+                const auto name = symbol.name;
+                confirmAction("Remove this symbol?",
+                              "\"" + name + "\" is forgotten. Every address box that spells it stops resolving; "
+                              "type it back to restore the definition.",
+                              "Remove",
+                              [this, name] {
+                                  services_.symbols().undefine(name);
+                                  notifyInfo(name + " removed.");
+                              });
             }
 
             ImGui::PopID();

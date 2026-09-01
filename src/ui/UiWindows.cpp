@@ -8,7 +8,7 @@
 namespace ire::ui {
 
 void UiApp::renderAboutWindow() {
-    ImGui::SetNextWindowSizeConstraints(ImVec2(480.0f, 0.0f), ImVec2(720.0f, FLT_MAX));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(scaled(480.0f), 0.0f), ImVec2(scaled(720.0f), FLT_MAX));
     if (ImGui::Begin("About Pointer Lab", &showAbout_, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking)) {
         ImGui::TextUnformatted(POINTERLAB_PRODUCT_NAME " " POINTERLAB_VERSION_STRING);
         ImGui::TextDisabled("Windows x64 user-mode memory research tool");
@@ -17,17 +17,17 @@ void UiApp::renderAboutWindow() {
         ImGui::TextUnformatted(
             "Pointer Lab is free software licensed under the GNU General Public License, "
             "version 2. It is GPL licensed because it statically links Keystone.");
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        ImGui::Dummy(ImVec2(0.0f, scaled(6.0f)));
         ImGui::TextUnformatted("Source code:");
         ImGui::TextDisabled(POINTERLAB_REPO_URL);
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        ImGui::Dummy(ImVec2(0.0f, scaled(6.0f)));
         ImGui::TextUnformatted("Third-party components:");
         ImGui::BulletText("Dear ImGui - MIT");
         ImGui::BulletText("Lua 5.4 - MIT");
         ImGui::BulletText("Zydis - MIT");
         ImGui::BulletText("Keystone - GPLv2");
         ImGui::BulletText("Roboto and Cousine fonts - Apache 2.0");
-        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        ImGui::Dummy(ImVec2(0.0f, scaled(6.0f)));
         ImGui::TextDisabled("See LICENSE and THIRD_PARTY_NOTICES.md for full terms.");
         ImGui::PopTextWrapPos();
     }
@@ -35,9 +35,12 @@ void UiApp::renderAboutWindow() {
 }
 
 void UiApp::renderHelpWindow() {
-    ImGui::SetNextWindowSizeConstraints(ImVec2(520.0f, 0.0f), ImVec2(820.0f, FLT_MAX));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(scaled(520.0f), 0.0f), ImVec2(scaled(820.0f), FLT_MAX));
     if (ImGui::Begin("Help", &showHelp_, ImGuiWindowFlags_NoDocking)) {
-        ImGui::PushTextWrapPos(780.0f);
+        // Wrap at the content edge rather than a fixed 780: the window is
+        // resizable down to 520, and an absolute wrap position clipped every
+        // paragraph on the right instead of re-flowing it.
+        ImGui::PushTextWrapPos(0.0f);
 
         ImGui::PushStyleColor(ImGuiCol_Text, colorFromBytes(232, 184, 92));
         ImGui::TextUnformatted("Responsible use");
@@ -47,7 +50,7 @@ void UiApp::renderHelpWindow() {
             "online games or other people's systems may breach their terms of service or the law "
             "where you live. Anti-cheat software commonly treats tools like this as an attack.");
 
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::Dummy(ImVec2(0.0f, scaled(8.0f)));
         ImGui::SeparatorText("Access");
         ImGui::TextUnformatted(
             "Pointer Lab requests SeDebugPrivilege at startup. Without it, many processes can only "
@@ -55,13 +58,13 @@ void UiApp::renderHelpWindow() {
             "and injection all fail. Run as administrator for full access. The command bar shows "
             "READ-ONLY when access is limited.");
 
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::Dummy(ImVec2(0.0f, scaled(8.0f)));
         ImGui::SeparatorText("Address input");
         ImGui::TextUnformatted(
             "Every address field is read as hexadecimal, with or without an 0x prefix. "
             "'140001000' and '0x140001000' are the same address.");
 
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::Dummy(ImVec2(0.0f, scaled(8.0f)));
         ImGui::SeparatorText("Disassembler and assembler");
         ImGui::TextUnformatted(
             "The listing is decoded by Zydis and the assembler is Keystone, so the whole x86-64 "
@@ -75,7 +78,7 @@ void UiApp::renderHelpWindow() {
         ImGui::BulletText("For raw bytes use '.byte 0x90, 0x90' or the Memory panel's patch field.");
         ImGui::BulletText("Follow jumps and calls with the button beside a branch in the listing.");
 
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::Dummy(ImVec2(0.0f, scaled(8.0f)));
         ImGui::SeparatorText("Breakpoints");
         ImGui::TextUnformatted(
             "Setting a breakpoint writes an int3 over the first byte at that address. When it is hit, "
@@ -88,7 +91,7 @@ void UiApp::renderHelpWindow() {
         ImGui::TextUnformatted("cost of a round trip to the debugger on every hit.");
         ImGui::Unindent();
 
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::Dummy(ImVec2(0.0f, scaled(8.0f)));
         ImGui::SeparatorText("Pointer chains");
         ImGui::TextUnformatted(
             "A chain added from the pointer scanner is stored as a module name plus an offset and a "
@@ -96,7 +99,7 @@ void UiApp::renderHelpWindow() {
             "so the entry keeps tracking the value after the target restarts somewhere else. An entry "
             "whose chain stops resolving is shown as unresolved rather than reading a stale address.");
 
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::Dummy(ImVec2(0.0f, scaled(8.0f)));
         ImGui::SeparatorText("Lua");
         ImGui::TextUnformatted(
             "Scripts run on a background thread and can be stopped with the Stop button, so a runaway "
@@ -104,7 +107,7 @@ void UiApp::renderHelpWindow() {
             "require, dofile, loadfile and the destructive half of os are removed, because a script "
             "pasted from the internet has no business touching your file system.");
 
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::Dummy(ImVec2(0.0f, scaled(8.0f)));
         ImGui::SeparatorText("Keyboard");
         ImGui::BulletText("F1 - F12   Toggle freeze on the address list entry with that hotkey.");
         ImGui::TextDisabled(
@@ -114,7 +117,7 @@ void UiApp::renderHelpWindow() {
             "A key another application already owns cannot be registered, and falls back to working "
             "only while Pointer Lab has focus.");
 
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::Dummy(ImVec2(0.0f, scaled(8.0f)));
         ImGui::SeparatorText("Files");
         ImGui::BulletText("Projects are saved as .iretable files (File menu).");
         ImGui::BulletText("Logs, layout, session, settings and crash dumps live in %%LOCALAPPDATA%%\\PointerLab.");

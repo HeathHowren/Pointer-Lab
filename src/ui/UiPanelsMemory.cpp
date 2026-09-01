@@ -18,7 +18,17 @@ void UiApp::renderMemoryPanel() {
 
     constexpr std::size_t bytesPerRow = 16;
 
-    ImGui::SetNextItemWidth(230.0f);
+    // Two rows rather than one. Eleven widgets chained with SameLine came to
+    // roughly 710 pixels, and the panel's home in the default layout is a 28%
+    // right split -- so "row >" and "page >>" were clipped off the edge with
+    // no way to reach them, which is exactly the navigation this panel exists
+    // for.
+    const float bytesBoxWidth = ImGui::CalcTextSize("00000").x + ImGui::GetStyle().FramePadding.x * 2.0f +
+                                ImGui::CalcTextSize("Bytes").x + ImGui::GetStyle().ItemInnerSpacing.x;
+    const float goWidth = ImGui::CalcTextSize("Go").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    ImGui::SetNextItemWidth(
+        std::max(120.0f, ImGui::GetContentRegionAvail().x - goWidth - bytesBoxWidth -
+                             ImGui::GetStyle().ItemSpacing.x * 2.0f));
     const bool submitted =
         ImGui::InputTextWithHint("##memory-address", "0x7FF... or client.dll+0x4A2C10", memoryAddress_.data(),
                                  memoryAddress_.size(), ImGuiInputTextFlags_EnterReturnsTrue);
@@ -32,8 +42,10 @@ void UiApp::renderMemoryPanel() {
         }
     }
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(110.0f);
-    ImGui::InputInt("Bytes", &memoryReadSize_);
+    ImGui::SetNextItemWidth(ImGui::CalcTextSize("00000").x + ImGui::GetStyle().FramePadding.x * 2.0f);
+    // Step 0: the default step renders -/+ buttons inside the item and leaves
+    // the text field with almost nothing.
+    ImGui::InputInt("Bytes", &memoryReadSize_, 0, 0);
     memoryReadSize_ = std::clamp(memoryReadSize_, 16, 4096);
 
     // Navigation, because the lesson this panel exists for is "walk backwards
@@ -52,7 +64,6 @@ void UiApp::renderMemoryPanel() {
         memoryEditOffset_ = -1;
         copyText(memoryAddress_.data(), memoryAddress_.size(), domain::toHex(memoryCursor_));
     };
-    ImGui::SameLine();
     if (ImGui::Button("<< page")) {
         move(-static_cast<std::intptr_t>(window));
     }
@@ -86,7 +97,7 @@ void UiApp::renderMemoryPanel() {
         }
     }
     memoryPreviousBase_ = memoryCursor_;
-    memoryPrevious_ = bytes;
+    memoryPrevious_ = bytes;  // kept for the next frame's comparison
 
     // Where the view actually is, named rather than numbered when it can be.
     // After following three pointers by hand the typed address is long out of
@@ -103,7 +114,11 @@ void UiApp::renderMemoryPanel() {
     if (ImGui::BeginTabBar("memory-tabs")) {
         if (ImGui::BeginTabItem("Hex")) {
             if (!bytes.empty()) {
-                ImGui::BeginChild("hex-view", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
+                // NoScrollWithMouse because the wheel is handled below: without
+                // it a large read made the child scrollable too, and one wheel
+                // notch both scrolled the child and paged the cursor.
+                ImGui::BeginChild("hex-view", ImVec2(0, 0), true,
+                                  ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
                 // The wheel over the hex area moves by rows, which is what
                 // every other hex editor does and therefore what fingers expect.
                 if (ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel != 0.0f) {
@@ -112,6 +127,13 @@ void UiApp::renderMemoryPanel() {
                 }
                 ImGui::PushFont(monoFont_, monoFont_->LegacySize);
                 const float cellWidth = ImGui::CalcTextSize("00 ").x;
+
+                // Where the ASCII gutter starts, measured from the row origin
+                // rather than from wherever the last cell happened to end: a
+                // read size that is not a multiple of 16 leaves a short final
+                // row, and a relative SameLine jumped its ASCII column left.
+                const float addressWidth = ImGui::CalcTextSize("0x0000000000000000 ").x;
+                const float asciiColumn = addressWidth + cellWidth * bytesPerRow + scaled(24.0f);
 
                 for (std::size_t row = 0; row < bytes.size(); row += bytesPerRow) {
                     const auto rowAddress = memoryCursor_ + row;
@@ -124,11 +146,21 @@ void UiApp::renderMemoryPanel() {
 
                         if (memoryEditOffset_ == static_cast<int>(offset)) {
                             ImGui::SetNextItemWidth(cellWidth * 1.6f);
-                            ImGui::SetKeyboardFocusHere();
+                            // Focus is claimed once, on the frame the editor
+                            // opens. Asking for it every frame meant clicking
+                            // into any other box in the application handed the
+                            // keyboard straight back to this cell, and only
+                            // Enter or Escape could break out.
+                            if (ImGui::GetActiveID() != ImGui::GetID("##edit")) {
+                                ImGui::SetKeyboardFocusHere();
+                            }
                             const bool done = ImGui::InputText(
                                 "##edit", memoryEditText_.data(), memoryEditText_.size(),
                                 ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_EnterReturnsTrue |
                                     ImGuiInputTextFlags_AutoSelectAll);
+                            // Clicking away cancels, the way every other
+                            // in-place editor behaves.
+                            const bool abandoned = ImGui::IsItemDeactivated() && !done;
                             if (done) {
                                 const auto value = domain::parseHexBytes(memoryEditText_.data());
                                 if (value.empty()) {
@@ -140,7 +172,7 @@ void UiApp::renderMemoryPanel() {
                                                 domain::toHex(memoryCursor_ + offset) + ": " + written.error());
                                 }
                                 memoryEditOffset_ = -1;
-                            } else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                            } else if (abandoned || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
                                 memoryEditOffset_ = -1;
                             }
                         } else {
@@ -161,7 +193,7 @@ void UiApp::renderMemoryPanel() {
                             }
                             if (ImGui::IsItemHovered()) {
                                 ImGui::SetTooltip("%s\n\nClick to edit this byte.\nRight-click to follow it as a "
-                                                  "pointer.",
+                                                  "pointer, disassemble, watch or dissect.",
                                                   domain::toHex(memoryCursor_ + offset).c_str());
                             }
                             if (ImGui::BeginPopupContextItem("##cell-menu")) {
@@ -197,7 +229,7 @@ void UiApp::renderMemoryPanel() {
                         ImGui::PopID();
                     }
 
-                    ImGui::SameLine(0, 24);
+                    ImGui::SameLine(asciiColumn);
                     std::string ascii;
                     for (std::size_t col = 0; col < bytesPerRow && row + col < bytes.size(); ++col) {
                         const unsigned char c = bytes[row + col];
@@ -276,9 +308,11 @@ void UiApp::renderMemoryPanel() {
 }
 void UiApp::renderDisassemblyPanel() {
     ImGui::Begin("Disassembly", &showDisassembly_);
-    ImGui::SetNextItemWidth(220.0f);
+    ImGui::SetNextItemWidth(scaled(220.0f));
     ImGui::InputTextWithHint("Address", "0x7FF... or client.dll+0x4A2C10", disasmAddress_.data(), disasmAddress_.size());
-    const auto address = resolveAddress(disasmAddress_.data());
+    // Cached: this runs every frame, and an address box naming an export walks
+    // that module's whole export directory to answer.
+    const auto address = resolveAddressCached(disasmAddress_.data());
     if (ImGui::BeginTabBar("disasm-tabs")) {
         if (ImGui::BeginTabItem("Listing")) {
             if (address && services_.session().attached()) {
@@ -288,10 +322,10 @@ void UiApp::renderDisassemblyPanel() {
                 }
                 ImGui::PushFont(monoFont_, monoFont_->LegacySize);
                 if (ImGui::BeginTable("disasm", 4, denseTableFlags | ImGuiTableFlags_ScrollY, ImVec2(0, 0))) {
-                    ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 130.0f);
-                    ImGui::TableSetupColumn("Bytes", ImGuiTableColumnFlags_WidthFixed, 190.0f);
+                    ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, scaled(130.0f));
+                    ImGui::TableSetupColumn("Bytes", ImGuiTableColumnFlags_WidthFixed, scaled(190.0f));
                     ImGui::TableSetupColumn("Instruction");
-                    ImGui::TableSetupColumn("##follow", ImGuiTableColumnFlags_WidthFixed, 66.0f);
+                    ImGui::TableSetupColumn("##follow", ImGuiTableColumnFlags_WidthFixed, scaled(66.0f));
                     ImGui::TableHeadersRow();
                     for (const auto& ins : instructions) {
                         ImGui::PushID(reinterpret_cast<const void*>(ins.address));
@@ -326,7 +360,10 @@ void UiApp::renderDisassemblyPanel() {
         if (ImGui::BeginTabItem("Assembler Patch")) {
             ImGui::TextDisabled("Intel syntax, one instruction per line. ';' and '//' begin a comment.");
             ImGui::TextDisabled("Assembled at the Address above, so relative jumps and calls resolve correctly.");
-            ImGui::InputTextMultiline("##Assembler", assemblerText_.data(), assemblerText_.size(), ImVec2(-1, -34.0f));
+            // Reserve exactly one button row, derived from the frame height
+            // rather than the 34 pixels it happens to be at the default font.
+            ImGui::InputTextMultiline("##Assembler", assemblerText_.data(), assemblerText_.size(),
+                                      ImVec2(-1, -ImGui::GetFrameHeightWithSpacing()));
             if (ImGui::Button("Assemble and patch")) {
                 if (!address) {
                     notifyError("Enter the address to assemble at.");
@@ -402,7 +439,7 @@ void UiApp::renderBreakpointPanel() {
             notifyError("Debugger attach failed: " + result.error());
         }
     }
-    ImGui::SetNextItemWidth(210.0f);
+    ImGui::SetNextItemWidth(scaled(210.0f));
     ImGui::InputTextWithHint("Address", "0x7FF... or client.dll+0x4A2C10", breakpointAddress_.data(), breakpointAddress_.size());
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-60.0f);
@@ -415,7 +452,7 @@ void UiApp::renderBreakpointPanel() {
         "Software (int3)", "Hardware execute", "Hardware write", "Hardware read/write"};
     static constexpr std::array<std::uint8_t, 4> breakpointWidths{1, 2, 4, 8};
 
-    ImGui::SetNextItemWidth(210.0f);
+    ImGui::SetNextItemWidth(scaled(210.0f));
     ImGui::Combo("Kind", &breakpointKindIndex_, breakpointKindLabels.data(),
                  static_cast<int>(breakpointKindLabels.size()));
     const auto kind = breakpointKinds[static_cast<std::size_t>(breakpointKindIndex_)];
@@ -423,7 +460,7 @@ void UiApp::renderBreakpointPanel() {
         kind == domain::BreakpointKind::HardwareWrite || kind == domain::BreakpointKind::HardwareReadWrite;
     if (watchesData) {
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(110.0f);
+        ImGui::SetNextItemWidth(scaled(110.0f));
         ImGui::Combo("Width", &breakpointWidthIndex_, "1 byte\0" "2 bytes\0" "4 bytes\0" "8 bytes\0");
     }
     ImGui::SameLine();
@@ -455,14 +492,21 @@ void UiApp::renderBreakpointPanel() {
         "hit never disarms anything in the first place.");
 
     const auto breakpoints = services_.breakpoints().breakpoints();
-    if (ImGui::BeginTable("breakpoints", 7, denseTableFlags | ImGuiTableFlags_ScrollY, ImVec2(0, 0))) {
-        ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 130.0f);
-        ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 130.0f);
-        ImGui::TableSetupColumn("Armed", ImGuiTableColumnFlags_WidthFixed, 56.0f);
-        ImGui::TableSetupColumn("Hits", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("Last thread", ImGuiTableColumnFlags_WidthFixed, 88.0f);
-        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+    // Seven columns do not fit the width this panel docks to, and without
+    // ScrollX the last four were cut off with no way to scroll to them --
+    // including Armed and the Remove button. A stretch column cannot be used
+    // alongside it, so Label takes a fixed width too.
+    if (ImGui::BeginTable("breakpoints", 7,
+                          denseTableFlags | ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX,
+                          ImVec2(0, 0))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, scaled(130.0f));
+        ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, scaled(160.0f));
+        ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, scaled(130.0f));
+        ImGui::TableSetupColumn("Armed", ImGuiTableColumnFlags_WidthFixed, scaled(56.0f));
+        ImGui::TableSetupColumn("Hits", ImGuiTableColumnFlags_WidthFixed, scaled(70.0f));
+        ImGui::TableSetupColumn("Last thread", ImGuiTableColumnFlags_WidthFixed, scaled(88.0f));
+        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, scaled(150.0f));
         ImGui::TableHeadersRow();
         for (const auto& bp : breakpoints) {
             ImGui::PushID(reinterpret_cast<const void*>(bp.address));

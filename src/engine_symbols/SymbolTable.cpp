@@ -267,4 +267,27 @@ std::string SymbolTable::describe(domain::TargetSession& session, std::uintptr_t
     return domain::narrow(module->name) + (offset == 0 ? "" : "+" + domain::toHex(offset));
 }
 
+std::string SymbolTable::describe(const std::vector<domain::ModuleInfo>& modules, std::uintptr_t address) const {
+    if (address == 0) {
+        return {};
+    }
+    {
+        std::scoped_lock lock(mutex_);
+        const auto symbol = std::find_if(symbols_.begin(), symbols_.end(),
+                                         [address](const Symbol& s) { return s.address == address; });
+        if (symbol != symbols_.end()) {
+            return symbol->name;
+        }
+    }
+
+    const auto module = std::find_if(modules.begin(), modules.end(), [address](const domain::ModuleInfo& m) {
+        return address >= m.base && address < m.base + m.size;
+    });
+    if (module == modules.end()) {
+        return {};
+    }
+    const auto offset = address - module->base;
+    return domain::narrow(module->name) + (offset == 0 ? "" : "+" + domain::toHex(offset));
+}
+
 } // namespace ire::engine_symbols

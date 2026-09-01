@@ -43,25 +43,42 @@ void UiApp::renderMenu() {
         ImGui::MenuItem("Show manual address editor", nullptr, &showManualAddressEditor_);
         ImGui::MenuItem("Show scan filters",          nullptr, &showScannerFilters_);
         ImGui::Separator();
-        if (ImGui::MenuItem("Memory Viewer"))  showMemoryViewer_  = true;
-        if (ImGui::MenuItem("Disassembly"))   showDisassembly_   = true;
-        if (ImGui::MenuItem("Breakpoints"))   showBreakpoints_   = true;
-        if (ImGui::MenuItem("Access Watch"))  showAccessWatch_   = true;
-        if (ImGui::MenuItem("Patches"))       showPatches_       = true;
-        if (ImGui::MenuItem("Symbols"))       showSymbols_       = true;
-        if (ImGui::MenuItem("Modules"))       showModules_       = true;
-        if (ImGui::MenuItem("Memory Regions")) showMemoryRegions_ = true;
-        if (ImGui::MenuItem("Logs"))          showLogs_          = true;
+        // The checkmark form: show the current state and let the same item
+        // close the panel; also focus it when opening, so clicking a panel
+        // that is already open but buried behind a dock tab brings it
+        // forward rather than doing nothing visible.
+        const auto panelItem = [this](const char* name, bool& flag) {
+            if (ImGui::MenuItem(name, nullptr, flag)) {
+                flag = true;
+                focusPanel_ = name;
+            }
+        };
+        panelItem("Memory Viewer",  showMemoryViewer_);
+        panelItem("Disassembly",    showDisassembly_);
+        panelItem("Breakpoints",    showBreakpoints_);
+        panelItem("Access Watch",   showAccessWatch_);
+        panelItem("Patches",        showPatches_);
+        panelItem("Symbols",        showSymbols_);
+        panelItem("Modules",        showModules_);
+        panelItem("Memory Regions", showMemoryRegions_);
+        panelItem("Logs",           showLogs_);
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Tools")) {
-        if (ImGui::MenuItem("Pointer Scanner")) showPointerScanner_ = true;
-        if (ImGui::MenuItem("Lua Scanner"))    showLuaScanner_     = true;
-        if (ImGui::MenuItem("Injection"))      showInjection_      = true;
-        if (ImGui::MenuItem("Scripts"))        showScripts_        = true;
-        if (ImGui::MenuItem("Structures"))     showStructures_     = true;
-        if (ImGui::MenuItem("Speed and Export")) showSpeed_       = true;
-        if (ImGui::MenuItem("Lua Console"))    showLuaConsole_     = true;
+        const auto panelItem = [this](const char* name, bool& flag) {
+            if (ImGui::MenuItem(name, nullptr, flag)) {
+                flag = true;
+                focusPanel_ = name;
+            }
+        };
+        panelItem("Pointer Scanner",  showPointerScanner_);
+        panelItem("Lua Scanner",      showLuaScanner_);
+        panelItem("Injection",        showInjection_);
+        panelItem("Scripts",          showScripts_);
+        panelItem("Structures",       showStructures_);
+        panelItem("Speed and Export", showSpeed_);
+        panelItem("Lua Console",      showLuaConsole_);
+        panelItem("MCP Server",       showMcp_);
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Target")) {
@@ -158,7 +175,7 @@ void UiApp::renderCommandBar() {
     }
 
     ImGui::SameLine();
-    ImGui::Dummy(ImVec2(20.0f, 0.0f));
+    ImGui::Dummy(ImVec2(scaled(20.0f), 0.0f));
     ImGui::SameLine();
     const auto scanProgress = services_.scanJob().progress();
     statusPill(scanProgress.running ? "SCAN RUNNING" : "SCAN IDLE", scanProgress.running ? colorFromBytes(51, 94, 120) : colorFromBytes(50, 63, 76));
@@ -187,9 +204,11 @@ void UiApp::renderCommandBar() {
         resetDockLayout_ = true;
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton("Detach") && attached) {
+    ImGui::BeginDisabled(!attached);
+    if (ImGui::SmallButton("Detach")) {
         requestDetach();
     }
+    ImGui::EndDisabled();
 
     ImGui::End();
 }

@@ -40,6 +40,18 @@ public:
     [[nodiscard]] std::vector<ModuleInfo> modules() const;
     [[nodiscard]] std::vector<MemoryRegion> regions() const;
 
+    // Bumped whenever the module and region tables change -- that is, by attach,
+    // refresh and detach, and by nothing else. Anything that caches a result
+    // derived from them stores the generation it was computed at and recomputes
+    // when the two disagree, which is far cheaper than copying the tables every
+    // frame to find out they have not moved.
+    [[nodiscard]] std::uint64_t generation() const;
+
+    // True when the handle is still open but the process behind it has exited.
+    // A handle to a dead process stays valid, so attached() alone would keep
+    // reporting a live target while every read failed one at a time.
+    [[nodiscard]] bool exited() const;
+
     infra::Result<std::vector<std::uint8_t>> readBytes(std::uintptr_t address, std::size_t size) const;
     infra::Result<void> writeBytes(std::uintptr_t address, const std::vector<std::uint8_t>& bytes) const;
 
@@ -58,6 +70,7 @@ private:
     std::wstring processName_;
     std::vector<ModuleInfo> modules_;
     std::vector<MemoryRegion> regions_;
+    std::uint64_t generation_{1};
     AddressList addressList_;
 };
 

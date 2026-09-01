@@ -23,6 +23,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <exception>
 
 namespace ire::ui {
 
@@ -49,13 +50,14 @@ void release(T*& object) {
 // The script side: queue a request, wait for the UI thread to run it
 // ---------------------------------------------------------------------------
 
-infra::Result<void> UiApp::automationRequest(AutomationRequest::Kind kind, std::string text, int first,
-                                             int second) {
-    auto request = std::make_shared<AutomationRequest>();
-    request->kind = kind;
-    request->text = std::move(text);
-    request->first = first;
-    request->second = second;
+infra::Result<void> UiApp::submitRequest(std::shared_ptr<AutomationRequest> request) {
+    // A request submitted from the UI thread itself would wait for a drain that
+    // cannot run until it returns. Nothing does that today, but the failure is a
+    // silently hung window rather than an error, so it is checked rather than
+    // relied upon.
+    if (std::this_thread::get_id() == uiThreadId_) {
+        return Result<void>::fail("A window request cannot be made from the UI thread itself.");
+    }
 
     std::unique_lock lock(automationMutex_);
     automationQueue_.push_back(request);
@@ -69,6 +71,50 @@ infra::Result<void> UiApp::automationRequest(AutomationRequest::Kind kind, std::
         return Result<void>::fail(request->error);
     }
     return Result<void>::ok();
+}
+
+infra::Result<void> UiApp::automationRequest(AutomationRequest::Kind kind, std::string text, int first,
+                                             int second) {
+    auto request = std::make_shared<AutomationRequest>();
+    request->kind = kind;
+    request->text = std::move(text);
+    request->first = first;
+    request->second = second;
+    return submitRequest(std::move(request));
+}
+
+infra::Result<void> UiApp::runOnUiThread(std::function<void()> work) {
+    if (!work) {
+        return Result<void>::ok();
+    }
+    auto request = std::make_shared<AutomationRequest>();
+    request->kind = AutomationRequest::Kind::Invoke;
+    request->work = std::move(work);
+    return submitRequest(std::move(request));
+}
+
+infra::Result<void> UiApp::saveProject(const std::string& path) {
+    auto outcome = Result<void>::fail("The project was not saved.");
+    // Not quiet: the person at the window should see that their project was
+    // just written, and by what.
+    if (auto ran = runOnUiThread([&] { outcome = saveProjectTo(std::filesystem::path(path), false); }); !ran) {
+        return ran;
+    }
+    return outcome;
+}
+
+infra::Result<void> UiApp::loadProject(const std::string& path) {
+    auto outcome = Result<void>::fail("The project was not loaded.");
+    if (auto ran = runOnUiThread([&] {
+            outcome = loadProjectFrom(std::filesystem::path(path), false);
+            if (outcome) {
+                projectPath_ = std::filesystem::path(path);
+            }
+        });
+        !ran) {
+        return ran;
+    }
+    return outcome;
 }
 
 infra::Result<void> UiApp::screenshot(const std::string& path) {
@@ -126,6 +172,7 @@ bool* UiApp::panelFlag(const std::string& name) {
     if (name == "Lua Scanner")      { return &showLuaScanner_; }
     if (name == "Injection")        { return &showInjection_; }
     if (name == "Lua Console")      { return &showLuaConsole_; }
+    if (name == "MCP Server")       { return &showMcp_; }
     return nullptr;
 }
 
@@ -196,6 +243,22 @@ void UiApp::drainAutomation() {
             break;
         case AutomationRequest::Kind::Quit:
             quitRequested_ = true;
+            break;
+        case AutomationRequest::Kind::Invoke:
+            // The work reports through whatever it captured, so there is nothing
+            // to record here. It is wrapped because a handler that threw would
+            // otherwise unwind through the frame loop and take the window with
+            // it -- and the thread waiting on this request would wait out its
+            // full timeout for an answer that is never coming.
+            try {
+                request->work();
+            } catch (const std::exception& error) {
+                request->ok = false;
+                request->error = error.what();
+            } catch (...) {
+                request->ok = false;
+                request->error = "The request threw an unknown exception.";
+            }
             break;
         case AutomationRequest::Kind::Screenshot:
             break;

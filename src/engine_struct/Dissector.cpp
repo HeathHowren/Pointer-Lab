@@ -30,6 +30,7 @@ std::uint64_t toLittleEndian(const std::vector<std::uint8_t>& bytes) {
 // pass asks it once per four bytes of the object.
 class RegionIndex {
 public:
+    RegionIndex() = default;
     explicit RegionIndex(const domain::TargetSession& session) {
         for (const auto& region : session.regions()) {
             if (region.state == MEM_COMMIT && region.readable) {
@@ -134,8 +135,27 @@ bool looksLikeDouble(const std::vector<std::uint8_t>& bytes) {
     return magnitude >= 1e-6 && magnitude <= 1e9;
 }
 
+// Kept between calls: building one copies every region in the target and sorts
+// them, and the panel that needs it reads every frame.
+struct Dissector::RegionCache {
+    std::uint64_t generation{};
+    RegionIndex index;
+};
+
 Dissector::Dissector(domain::TargetSession& session, const engine_symbols::SymbolTable& symbols)
     : session_(session), symbols_(symbols) {}
+
+std::shared_ptr<const Dissector::RegionCache> Dissector::cachedRegions() const {
+    std::scoped_lock lock(regionMutex_);
+    const auto generation = session_.generation();
+    if (!regionCache_ || regionCache_->generation != generation) {
+        auto rebuilt = std::make_shared<RegionCache>();
+        rebuilt->generation = generation;
+        rebuilt->index = RegionIndex(session_);
+        regionCache_ = std::move(rebuilt);
+    }
+    return regionCache_;
+}
 
 std::uint64_t Dissector::add(std::string name) {
     std::scoped_lock lock(mutex_);
@@ -280,8 +300,8 @@ std::optional<domain::Structure> Dissector::find(std::uint64_t id) const {
 }
 
 bool Dissector::looksLikePointer(const std::vector<std::vector<std::uint8_t>>& samples) const {
-    const RegionIndex regions(session_);
-    return pointerLike(samples, session_.pointerSize(), regions);
+    const auto regions = cachedRegions();
+    return pointerLike(samples, session_.pointerSize(), regions->index);
 }
 
 domain::ValueType Dissector::classify(const std::vector<std::vector<std::uint8_t>>& samples) const {
@@ -294,10 +314,10 @@ domain::ValueType Dissector::classify(const std::vector<std::vector<std::uint8_t
         return domain::ValueType::Bytes;
     }
 
-    const RegionIndex regions(session_);
+    const auto regions = cachedRegions();
     const auto pointerWidth = session_.pointerSize();
 
-    if (width == pointerWidth && pointerLike(samples, pointerWidth, regions)) {
+    if (width == pointerWidth && pointerLike(samples, pointerWidth, regions->index)) {
         // Deliberately unsigned: an address printed as a negative number is
         // technically the same bits and useless to read.
         return pointerWidth == 8 ? domain::ValueType::UInt64 : domain::ValueType::UInt32;
@@ -363,8 +383,11 @@ infra::Result<Snapshot> Dissector::read(std::uint64_t id,
         }
     }
 
-    const RegionIndex regions(session_);
+    const auto regions = cachedRegions();
     const auto pointerWidth = session_.pointerSize();
+    // One snapshot for the whole read: describe() takes its own copy of the
+    // module list otherwise, once per pointer-shaped cell, every frame.
+    const auto modules = session_.modules();
 
     for (const auto& field : structure->fields) {
         Row row;
@@ -390,8 +413,8 @@ infra::Result<Snapshot> Dissector::read(std::uint64_t id,
                                         field.type == domain::ValueType::UInt32);
             if (pointerShaped) {
                 const auto value = static_cast<std::uintptr_t>(toLittleEndian(cell.bytes));
-                if (value != 0 && regions.contains(value)) {
-                    const auto described = symbols_.describe(session_, value);
+                if (value != 0 && regions->index.contains(value)) {
+                    const auto described = symbols_.describe(modules, value);
                     cell.annotation = "-> " + (described.empty() ? domain::toHex(value) : described);
                 }
             }
@@ -457,7 +480,7 @@ infra::Result<std::size_t> Dissector::guess(std::uint64_t id, const std::vector<
             " bytes. Either the object is smaller than that, or it does not start where you think.");
     }
 
-    const RegionIndex regions(session_);
+    const auto regions = cachedRegions();
     const auto pointerWidth = session_.pointerSize();
     const auto slice = [&windows](std::size_t offset, std::size_t width) {
         std::vector<std::vector<std::uint8_t>> samples;
@@ -477,7 +500,7 @@ infra::Result<std::size_t> Dissector::guess(std::uint64_t id, const std::vector<
         // "pointers" straddling two unrelated fields.
         if (offset % 8 == 0 && offset + 8 <= size) {
             const auto samples = slice(offset, 8);
-            if (pointerWidth == 8 && pointerLike(samples, 8, regions)) {
+            if (pointerWidth == 8 && pointerLike(samples, 8, regions->index)) {
                 fields.push_back({static_cast<std::ptrdiff_t>(offset), domain::ValueType::UInt64, 0,
                                   domain::defaultFieldName(static_cast<std::ptrdiff_t>(offset))});
                 offset += 8;
@@ -493,7 +516,7 @@ infra::Result<std::size_t> Dissector::guess(std::uint64_t id, const std::vector<
 
         const auto samples = slice(offset, 4);
         auto type = domain::ValueType::Int32;
-        if (pointerWidth == 4 && pointerLike(samples, 4, regions)) {
+        if (pointerWidth == 4 && pointerLike(samples, 4, regions->index)) {
             type = domain::ValueType::UInt32;
         } else if (everySampleOrZero(samples, looksLikeFloat)) {
             type = domain::ValueType::Float;

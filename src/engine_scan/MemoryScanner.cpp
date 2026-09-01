@@ -268,6 +268,22 @@ std::vector<domain::ScanResult> ScanJob::results() const {
     return results_;
 }
 
+std::size_t ScanJob::resultCount() const {
+    std::scoped_lock lock(mutex_);
+    return results_.size();
+}
+
+std::vector<domain::ScanResult> ScanJob::copyRange(std::size_t first, std::size_t count) const {
+    std::scoped_lock lock(mutex_);
+    if (first >= results_.size()) {
+        return {};
+    }
+    const auto begin = results_.begin() + static_cast<std::ptrdiff_t>(first);
+    const auto end = results_.begin() +
+                     static_cast<std::ptrdiff_t>(std::min(results_.size(), first + count));
+    return {begin, end};
+}
+
 void ScanJob::scanFirst(domain::ScanMode mode, domain::ScanValue value) {
     const auto started = std::chrono::steady_clock::now();
     const auto regions = session_.regions();

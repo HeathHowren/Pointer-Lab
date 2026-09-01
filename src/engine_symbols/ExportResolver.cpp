@@ -155,6 +155,17 @@ Entries ExportResolver::exports(domain::TargetSession& session, std::uintptr_t m
         return Entries::fail("No target process is attached.");
     }
 
+    const auto generation = session.generation();
+    {
+        std::scoped_lock lock(cacheMutex_);
+        if (generation != cacheGeneration_) {
+            cache_.clear();
+            cacheGeneration_ = generation;
+        } else if (const auto cached = cache_.find(moduleBase); cached != cache_.end()) {
+            return Entries::ok(cached->second);
+        }
+    }
+
     std::uint32_t directoryRva{};
     std::uint32_t directorySize{};
     if (!findExportDirectory(session, moduleBase, directoryRva, directorySize)) {
@@ -240,6 +251,16 @@ Entries ExportResolver::exports(domain::TargetSession& session, std::uintptr_t m
 
     std::sort(result.begin(), result.end(),
               [](const ExportEntry& a, const ExportEntry& b) { return a.name < b.name; });
+
+    {
+        std::scoped_lock lock(cacheMutex_);
+        // Only if the module table has not moved underneath this parse; a
+        // stale entry is worse than no entry.
+        if (session.generation() == generation) {
+            cacheGeneration_ = generation;
+            cache_[moduleBase] = result;
+        }
+    }
     return Entries::ok(std::move(result));
 }
 

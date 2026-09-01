@@ -74,6 +74,7 @@ add_executable(pointerlab_tests
     test_hotkeys.cpp
     test_pointer.cpp
     test_lua.cpp
+    test_mcp.cpp
     test_workflow.cpp
     test_wow64.cpp
     test_access_watch.cpp
@@ -94,6 +95,10 @@ target_link_libraries(pointerlab_tests PRIVATE
     pointerlab_core
     pointerlab_warnings
     Catch2::Catch2WithMain
+    # test_mcp.cpp opens a client socket against the server's own listener.
+    # pointerlab_core links this privately, so the tests need it in their own
+    # right.
+    ws2_32
 )
 
 # The tests locate the helper next to their own executable, so it only has to

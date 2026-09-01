@@ -67,7 +67,7 @@ void UiApp::newProject() {
                   });
 }
 
-bool UiApp::saveProjectTo(const std::filesystem::path& path, bool quiet) {
+infra::Result<void> UiApp::saveProjectTo(const std::filesystem::path& path, bool quiet) {
     storage::ProjectTable table;
     table.lastPid = services_.session().pid();
     table.lastProcessName = services_.session().processName();
@@ -94,22 +94,24 @@ bool UiApp::saveProjectTo(const std::filesystem::path& path, bool quiet) {
 
     auto saved = projectStore_.save(path, table);
     if (!saved) {
-        notifyError("Could not save " + path.filename().string() + ": " + saved.error());
-        return false;
+        const auto message = "Could not save " + path.filename().string() + ": " + saved.error();
+        notifyError(message);
+        return infra::Result<void>::fail(message, saved.code());
     }
     if (!quiet) {
         notifyInfo("Saved " + std::to_string(table.entries.size()) + " entries to " + path.filename().string() + ".");
     }
-    return true;
+    return infra::Result<void>::ok();
 }
 
-bool UiApp::loadProjectFrom(const std::filesystem::path& path, bool quiet) {
+infra::Result<void> UiApp::loadProjectFrom(const std::filesystem::path& path, bool quiet) {
     auto loaded = projectStore_.load(path);
     if (!loaded) {
+        const auto message = "Could not open " + path.filename().string() + ": " + loaded.error();
         if (!quiet) {
-            notifyError("Could not open " + path.filename().string() + ": " + loaded.error());
+            notifyError(message);
         }
-        return false;
+        return infra::Result<void>::fail(message, loaded.code());
     }
 
     const auto count = loaded.value().entries.size();
@@ -188,7 +190,7 @@ bool UiApp::loadProjectFrom(const std::filesystem::path& path, bool quiet) {
                     " target, but the attached process is " + domain::bitnessName(services_.session().bitness()) +
                     ". Pointer chains will resolve to the wrong offsets.");
     }
-    return true;
+    return infra::Result<void>::ok();
 }
 
 void UiApp::saveProject() {
@@ -196,7 +198,9 @@ void UiApp::saveProject() {
         saveProjectAs();
         return;
     }
-    saveProjectTo(projectPath_, false);
+    // Already reported through the toast channel inside; the Result is for the
+    // callers that have somewhere else to send it.
+    static_cast<void>(saveProjectTo(projectPath_, false));
 }
 
 void UiApp::saveProjectAs() {
@@ -240,7 +244,9 @@ void UiApp::saveSession() {
         services_.dissector().structures().empty()) {
         return;
     }
-    saveProjectTo(infra::Paths::sessionFile(), true);
+    // Quiet, and the failure is already logged by ProjectStore: the window is on
+    // its way out by now, so there is nowhere left to show a toast.
+    static_cast<void>(saveProjectTo(infra::Paths::sessionFile(), true));
 }
 
 void UiApp::loadSettings() {

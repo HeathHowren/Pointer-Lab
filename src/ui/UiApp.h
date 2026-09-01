@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mcp/McpServer.h"
 #include "scripting/LuaConsole.h"
 #include "services/RuntimeServices.h"
 #include "services/UiCommands.h"
@@ -9,14 +10,17 @@
 #include <imgui.h>
 
 #include <array>
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace ire::ui {
@@ -35,6 +39,14 @@ public:
     // interactive start.
     void setStartupScript(std::filesystem::path path) { startupScript_ = std::move(path); }
 
+    // --mcp: start the server as the window comes up, and open its panel so the
+    // token is on screen. Starting it without showing the panel would leave the
+    // one thing a client needs somewhere nobody was told to look.
+    void setStartupMcpPort(std::uint16_t port) {
+        startupMcpPort_ = port;
+        startMcpOnLaunch_ = true;
+    }
+
 private:
     static LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     LRESULT handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -47,6 +59,9 @@ private:
     void cleanupRenderTarget();
     void render();
     void applyStyle();
+    // The colours and metrics on their own, scaled to dpiScale_. Split out of
+    // applyStyle so a monitor change can redo it without re-adding the fonts.
+    void applyStyleSizes();
     void renderDockspace();
     void buildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size);
     void renderMenu();
@@ -54,6 +69,10 @@ private:
     void renderProcessPanel();
     void renderScanPanel();
     void renderAddressListPanel();
+    // Puts the manual-add / edit boxes back to their starting state, so a
+    // successful Apply does not leave the previous entry's contents lying in
+    // the editor for the next click to duplicate.
+    void resetAddressEditor();
     void renderMemoryPanel();
     // Points the hex editor at an address and shows it. Sets the cursor as well
     // as the address box, so following a pointer moves the view rather than
@@ -103,6 +122,7 @@ private:
     void renderInjectionPanel();
     void renderLuaScannerPanel();
     void renderLuaPanel();
+    void renderMcpPanel();
     void renderLogPanel();
     void renderToasts();
     void renderConfirmModal();
@@ -126,8 +146,13 @@ private:
     void openProjectDialog();
     void saveProject();
     void saveProjectAs();
-    bool saveProjectTo(const std::filesystem::path& path, bool quiet);
-    bool loadProjectFrom(const std::filesystem::path& path, bool quiet);
+    // Both report through the toast channel as well as returning, because they
+    // are called from the menu -- where the user is the one who needs to hear it
+    // -- and from the MCP server, where the caller is. `quiet` suppresses the
+    // toast for the autosave path; the returned Result carries the message
+    // either way.
+    infra::Result<void> saveProjectTo(const std::filesystem::path& path, bool quiet);
+    infra::Result<void> loadProjectFrom(const std::filesystem::path& path, bool quiet);
     void loadSession();
     void saveSession();
     // Preferences that belong to the installation rather than to a project.
@@ -146,6 +171,11 @@ private:
     // tool goes through this, so an expression written down once keeps working
     // after the target restarts and ASLR moves the module.
     [[nodiscard]] std::optional<std::uintptr_t> resolveAddress(const char* text);
+    // resolveAddress, memoized on (text, session generation). For the address
+    // boxes that resolve live on every frame: an expression naming an export
+    // ("kernel32.LoadLibraryW") walks the whole export directory, which is a
+    // read per named export -- fine once, a hang at sixty frames a second.
+    [[nodiscard]] std::optional<std::uintptr_t> resolveAddressCached(const char* text);
     // The same, but reporting why it failed. For the places where a wrong
     // answer is expensive enough to be worth a sentence.
     [[nodiscard]] infra::Result<std::uintptr_t> resolveAddressOrExplain(const char* text);
@@ -164,13 +194,20 @@ private:
     infra::Result<void> setWindowSize(int width, int height) override;
     infra::Result<void> waitFrames(int frames) override;
     infra::Result<void> quit() override;
+    infra::Result<void> runOnUiThread(std::function<void()> work) override;
+    infra::Result<void> saveProject(const std::string& path) override;
+    infra::Result<void> loadProject(const std::string& path) override;
 
     struct AutomationRequest {
-        enum class Kind { Screenshot, SelectPanel, SetLayout, SetWindowSize, WaitFrames, Quit };
+        enum class Kind { Screenshot, SelectPanel, SetLayout, SetWindowSize, WaitFrames, Quit, Invoke };
         Kind kind{};
         std::string text;
         int first{};
         int second{};
+        // For Kind::Invoke: the caller's own code, run on the UI thread. The
+        // request carries no result of its own -- whatever the work needs to
+        // report, it reports through what it captured.
+        std::function<void()> work;
         bool finished{};
         bool ok{true};
         std::string error;
@@ -179,6 +216,8 @@ private:
     // Queues one request and blocks until the UI thread has run it.
     infra::Result<void> automationRequest(AutomationRequest::Kind kind, std::string text = {},
                                           int first = 0, int second = 0);
+    // The queue-and-wait half, shared by every request shape.
+    infra::Result<void> submitRequest(std::shared_ptr<AutomationRequest> request);
     // Everything except a screenshot, run before the frame is built so that
     // opening a panel affects the frame about to be drawn.
     void drainAutomation();
@@ -198,6 +237,10 @@ private:
     IDXGISwapChain* swapChain_{};
     ID3D11RenderTargetView* renderTargetView_{};
     ImFont* monoFont_{};
+    // Contents scale of the monitor the window is on: 1.0 at 96 DPI, 1.5 at
+    // 150%. Read from the window rather than the system, because the two
+    // displays on a desk are routinely set to different scales.
+    float dpiScale_{1.0f};
     bool imguiInitialized_{};
     bool classRegistered_{};
     bool minimized_{};
@@ -207,7 +250,14 @@ private:
     // What syncGlobalHotkeys last asked for. Compared against rather than the
     // registered set, so a key the OS refuses is not retried every frame.
     std::set<int> hotkeysRequested_;
+    // The address list revision that set was computed from, so an unchanged
+    // list costs a counter comparison rather than a full snapshot.
+    std::uint64_t hotkeyListRevision_{};
     scripting::LuaConsole lua_;
+    // Off until someone starts it from the panel. Constructed here so it drives
+    // the same RuntimeServices this window does -- an agent and the person are
+    // then looking at one session rather than two.
+    mcp::McpServer mcpServer_;
     storage::ProjectStore projectStore_;
     std::filesystem::path projectPath_;
 
@@ -261,15 +311,23 @@ private:
     std::uintptr_t accessWatchDetail_{};
 
     std::vector<domain::ProcessInfo> processes_;
+    // Parallel to processes_, rebuilt by refreshProcesses(): the narrowed name
+    // the table draws and the lowercased one it filters against.
+    std::vector<std::string> processNames_;
+    std::vector<std::string> processNamesLower_;
     std::array<char, 128> processFilter_{};
 
     int scanTypeIndex_{4};
     int scanModeIndex_{0};
-    std::array<char, 128> scanText_{};
+    // 512 rather than 128: a byte pattern costs three characters per byte, so
+    // 128 held only 42 pattern bytes -- and real signatures run to 60. ImGui
+    // silently refused further characters, and the scan then ran against a
+    // truncated pattern.
+    std::array<char, 512> scanText_{};
     // The upper bound of a "value between" scan. Its own box rather than a
     // second meaning for scanText_, so switching modes never reinterprets what
     // is already typed.
-    std::array<char, 128> scanText2_{};
+    std::array<char, 512> scanText2_{};
     bool scanCaseInsensitive_{};
     bool scanWritableOnly_{};
     bool scanExecutableOnly_{};
@@ -295,6 +353,26 @@ private:
     // from the shared manual-editor field.
     std::array<char, 128> rowWriteValue_{};
     std::uint64_t rowWriteId_{};
+
+    // The address list's "Current" column, formatted. Reading it inline meant
+    // one ReadProcessMemory per row per frame -- for two hundred entries,
+    // twelve thousand syscalls a second, every one of them taking the session
+    // lock the freeze thread also wants. Refreshed on a timer instead: ten
+    // times a second is faster than the eye follows, and the freeze loop next
+    // door already runs at twenty for the same reason.
+    std::map<std::uint64_t, std::string> currentValues_;
+    std::chrono::steady_clock::time_point lastCurrentRefresh_{};
+
+    // Same reasoning for the Patches panel: PatchRegistry::drifted reads the
+    // target, and drift is a property that changes on the scale of the target
+    // rewriting its own code, not of frames.
+    std::map<std::uint64_t, bool> patchDrift_;
+    std::chrono::steady_clock::time_point lastDriftRefresh_{};
+
+    // And for the speed payload's status, which is four reads per frame to
+    // answer a question that only changes when the slider moves.
+    engine_speed::SpeedStatus speedStatus_{};
+    std::chrono::steady_clock::time_point lastSpeedPoll_{};
 
     std::array<char, 96> memoryAddress_{};
     std::array<char, 256> memoryPatch_{};
@@ -325,6 +403,19 @@ private:
     int pointerDepth_{3};
     int pointerTypeIndex_{4};
     std::array<char, 64> pointerMaxOffset_{"0x1000"};
+    // "Resolves to" for the rows currently on screen. Walking a chain is one
+    // read per level plus a module lookup, so resolving every visible row
+    // every frame was thousands of syscalls a second to answer a question
+    // whose answer moves on the scale of level loads.
+    std::map<int, std::string> pointerResolved_;
+    std::chrono::steady_clock::time_point lastPointerResolve_{};
+    std::size_t pointerResolvedFor_{};
+
+    // Backing store for resolveAddressCached. Keyed by the text; dropped
+    // wholesale when the target's module table changes, which is the only
+    // thing that can change what an expression resolves to.
+    std::map<std::string, std::optional<std::uintptr_t>> resolveCache_;
+    std::uint64_t resolveCacheGeneration_{};
 
     std::array<char, 64> allocSize_{"4096"};
     std::array<char, 64> threadStart_{};
@@ -338,7 +429,16 @@ private:
     bool luaScanExecutableOnly_{};
     std::array<char, 8192> luaScanScript_{};
 
-    std::array<char, 4096> luaInput_{};
+    // Opened on demand: it is meaningless until someone wants an agent driving
+    // the session, and it is not something to put in front of a first-time
+    // reader by default.
+    bool showMcp_{};
+    int mcpPort_{8722};
+    std::vector<std::string> mcpLog_;
+
+    // Sized to match scriptSource_: a pasted script silently stopped at 4 KB
+    // before, well below every other multiline editor in the app.
+    std::array<char, 16384> luaInput_{};
     std::vector<std::string> luaOutput_;
 
     std::array<char, 128> logFilter_{};
@@ -368,12 +468,33 @@ private:
     std::mutex automationMutex_;
     std::condition_variable automationDone_;
     std::vector<std::shared_ptr<AutomationRequest>> automationQueue_;
+    // Which thread drains the queue. A request submitted *from* that thread
+    // would wait for a drain that cannot happen until it returns, so it runs
+    // inline instead. Nothing does that today; it is here because the cost of
+    // being wrong about it is a hung window with no message.
+    std::thread::id uiThreadId_{};
     // Applied during the frame rather than at drain time: ImGui's focus call
     // belongs between NewFrame and Render.
     std::string focusPanel_;
     std::filesystem::path startupScript_;
     bool startupScriptSubmitted_{};
+    bool startMcpOnLaunch_{};
+    std::uint16_t startupMcpPort_{};
     bool quitRequested_{};
+
+    // Last time the "did the target process exit under us?" check ran. Cheap
+    // enough to do once a second; done every frame it would take the session
+    // lock 60 times a second for no gain, since a dead process cannot come
+    // back to life between ticks.
+    std::chrono::steady_clock::time_point lastExitCheck_{};
+
+    // The expanded access site's register interpretations. explain() copies the
+    // module and region lists and scans them once per register, so recomputing
+    // it every frame costs more than the rest of the panel together -- and the
+    // answer only changes when that site is hit again.
+    std::vector<engine_debug::RegisterMeaning> explainCache_;
+    std::uintptr_t explainCacheSite_{};
+    std::uint64_t explainCacheHits_{};
 };
 
 } // namespace ire::ui

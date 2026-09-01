@@ -15,6 +15,10 @@ void UiApp::applyStyle() {
     // Fonts are compiled into the binary (see EmbeddedFonts.h). Loading them
     // from disk meant that moving the executable away from resources/fonts/
     // left monoFont_ null, and the first panel to push it dereferenced null.
+    //
+    // Loaded at their design size: ImGui rasterizes at base size times
+    // style.FontScaleDpi, which it keeps in step with the monitor itself once
+    // io.ConfigDpiScaleFonts is on. Loading them pre-multiplied would fight it.
     io.Fonts->AddFontFromMemoryCompressedBase85TTF(RobotoMedium_compressed_data_base85, 15.0f);
     monoFont_ = io.Fonts->AddFontFromMemoryCompressedBase85TTF(CousineRegular_compressed_data_base85, 14.0f);
     if (!monoFont_) {
@@ -22,6 +26,16 @@ void UiApp::applyStyle() {
         // back to the always-present default font rather than a null pointer.
         monoFont_ = io.Fonts->AddFontDefault();
     }
+
+    applyStyleSizes();
+}
+
+// Rebuilt from the unscaled values every time rather than scaled in place: at
+// 125% a padding of 5 truncates to 6, and scaling that again on the way back
+// down does not return 5. Two trips across a DPI boundary and the layout has
+// visibly drifted.
+void UiApp::applyStyleSizes() {
+    ImGuiIO& io = ImGui::GetIO();
 
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
@@ -96,6 +110,11 @@ void UiApp::applyStyle() {
         style.WindowRounding = 0.0f;
         colors[ImGuiCol_WindowBg].w = 1.0f;
     }
+
+    // Padding, rounding and scrollbar widths are pixels, and ImGui scales none
+    // of them for DPI on its own -- only fonts and window rectangles. Without
+    // this, text on a 150% display grows and the boxes around it do not.
+    style.ScaleAllSizes(dpiScale_);
 }
 
 void UiApp::renderDockspace() {
@@ -165,6 +184,7 @@ void UiApp::buildDefaultDockLayout(ImGuiID dockspaceId, const ImVec2& size) {
 
     ImGui::DockBuilderDockWindow("Injection",         bottomRight);
     ImGui::DockBuilderDockWindow("Lua Console",       bottomRight);
+    ImGui::DockBuilderDockWindow("MCP Server",        bottomRight);
     ImGui::DockBuilderDockWindow("Logs",              bottomRight);
 
     ImGui::DockBuilderFinish(dockspaceId);

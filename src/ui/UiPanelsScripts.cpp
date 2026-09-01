@@ -40,9 +40,11 @@ void UiApp::renderScriptsPanel() {
     ImGui::TextDisabled("%zu script(s), %lld on", scripts.size(), static_cast<long long>(enabled));
     ImGui::SameLine();
     if (ImGui::SmallButton("New")) {
-        const auto id = assembler.add({}, "[ENABLE]\n\n[DISABLE]\n");
+        // A blank name renders as an empty row that nothing distinguishes from
+        // whitespace, and the user is left wondering why New "did not work".
+        const auto id = assembler.add("New script", "[ENABLE]\n\n[DISABLE]\n");
         editScriptId_ = id;
-        scriptName_.fill('\0');
+        copyText(scriptName_.data(), scriptName_.size(), "New script");
         copyText(scriptSource_.data(), scriptSource_.size(), "[ENABLE]\n\n[DISABLE]\n");
     }
     ImGui::SameLine();
@@ -77,10 +79,17 @@ void UiApp::renderScriptsPanel() {
 
     ImGui::Separator();
 
-    if (ImGui::BeginTable("scripts", 3, denseTableFlags, ImVec2(0, 120.0f))) {
-        ImGui::TableSetupColumn("On", ImGuiTableColumnFlags_WidthFixed, 34.0f);
+    // Without ScrollY the fixed 120px was a minimum, so at ~10 scripts the
+    // table grew unbounded and crushed the editor beneath it. The clipper
+    // and scrolling keep it bounded.
+    // Four rows and a header, in whatever a row currently measures, rather than
+    // a flat 120 pixels: on a scaled display that was two and a bit rows.
+    if (ImGui::BeginTable("scripts", 3, denseTableFlags | ImGuiTableFlags_ScrollY,
+                          ImVec2(0, ImGui::GetFrameHeightWithSpacing() * 5.0f))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("On", ImGuiTableColumnFlags_WidthFixed, scaled(34.0f));
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, scaled(140.0f));
         ImGui::TableHeadersRow();
 
         for (const auto& script : scripts) {
@@ -89,6 +98,11 @@ void UiApp::renderScriptsPanel() {
 
             ImGui::TableNextColumn();
             bool on = script.enabled;
+            // A dirty editor buffer means Check-and-then-enable would run the
+            // saved text, not the text the user just Check-ed. Refusing the
+            // toggle is more honest than quietly running the wrong version.
+            const bool dirty = editScriptId_ == script.id && !on && script.source != scriptSource_.data();
+            ImGui::BeginDisabled(dirty);
             if (ImGui::Checkbox("##enabled", &on)) {
                 if (auto result = assembler.setEnabled(script.id, on); !result) {
                     notifyError(result.error());
@@ -106,12 +120,34 @@ void UiApp::renderScriptsPanel() {
                     notifyInfo(script.name + " is off and the target is back as it was.");
                 }
             }
+            ImGui::EndDisabled();
+            if (dirty && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("Save your edits first. Turning this on runs the saved text, not what is in "
+                                  "the editor.");
+            }
 
             ImGui::TableNextColumn();
             if (ImGui::Selectable(script.name.c_str(), editScriptId_ == script.id)) {
-                editScriptId_ = script.id;
-                copyText(scriptName_.data(), scriptName_.size(), script.name);
-                copyText(scriptSource_.data(), scriptSource_.size(), script.source);
+                const bool wouldLose = editScriptId_ != 0 && editScriptId_ != script.id;
+                bool discard = true;
+                if (wouldLose) {
+                    if (const auto previous = assembler.find(editScriptId_)) {
+                        discard = previous->source == scriptSource_.data();
+                    }
+                }
+                const auto load = [this, id = script.id, name = script.name, src = script.source] {
+                    editScriptId_ = id;
+                    copyText(scriptName_.data(), scriptName_.size(), name);
+                    copyText(scriptSource_.data(), scriptSource_.size(), src);
+                };
+                if (!discard) {
+                    confirmAction("Discard unsaved edits?",
+                                  "The script you were editing has unsaved changes. Loading another script "
+                                  "replaces the editor text; there is no undo.",
+                                  "Discard and load", load);
+                } else {
+                    load();
+                }
             }
 
             ImGui::TableNextColumn();
@@ -150,7 +186,7 @@ void UiApp::renderScriptsPanel() {
     }
 
     ImGui::Separator();
-    ImGui::SetNextItemWidth(260.0f);
+    ImGui::SetNextItemWidth(scaled(260.0f));
     ImGui::InputTextWithHint("##script-name", "name", scriptName_.data(), scriptName_.size());
     ImGui::SameLine();
     ImGui::BeginDisabled(editing->enabled);
@@ -191,20 +227,31 @@ void UiApp::renderScriptsPanel() {
     }
     ImGui::SameLine();
     ImGui::TextDisabled("Templates:");
+    const auto applyTemplate = [&, this](engine_aa::AutoAssembler::Template shape) {
+        auto text = assembler.makeTemplate(shape, 0, {}, {});
+        // Templates blow away everything in the editor. The same discard prompt
+        // the row selector uses applies here for the same reason.
+        const bool dirty = editing && editing->source != scriptSource_.data();
+        if (dirty) {
+            confirmAction("Discard unsaved edits?",
+                          "The template replaces the entire editor text. There is no undo.",
+                          "Discard and load template",
+                          [this, text] { copyText(scriptSource_.data(), scriptSource_.size(), text); });
+        } else {
+            copyText(scriptSource_.data(), scriptSource_.size(), text);
+        }
+    };
     ImGui::SameLine();
     if (ImGui::SmallButton("AOB injection")) {
-        copyText(scriptSource_.data(), scriptSource_.size(),
-                 assembler.makeTemplate(engine_aa::AutoAssembler::Template::AobInjection, 0, {}, {}));
+        applyTemplate(engine_aa::AutoAssembler::Template::AobInjection);
     }
     ImGui::SameLine();
     if (ImGui::SmallButton("Code cave")) {
-        copyText(scriptSource_.data(), scriptSource_.size(),
-                 assembler.makeTemplate(engine_aa::AutoAssembler::Template::CodeCave, 0, {}, {}));
+        applyTemplate(engine_aa::AutoAssembler::Template::CodeCave);
     }
     ImGui::SameLine();
     if (ImGui::SmallButton("Full injection")) {
-        copyText(scriptSource_.data(), scriptSource_.size(),
-                 assembler.makeTemplate(engine_aa::AutoAssembler::Template::FullInjection, 0, {}, {}));
+        applyTemplate(engine_aa::AutoAssembler::Template::FullInjection);
     }
 
     ImGui::PushFont(monoFont_, monoFont_->LegacySize);
