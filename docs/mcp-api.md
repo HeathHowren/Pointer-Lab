@@ -68,6 +68,14 @@ address does not.
 Addresses come back **twice** — `address` as a number to feed to the next call,
 and `hex` as a string to show a person.
 
+**`hex` means something else in a row that carries bytes.** In `scan_results`,
+`read_bytes`, `disassemble` and `patches_list`, `hex` is the *data* — the value's
+bytes, the instruction's encoding, the patch's replacement — and the address is
+only ever the `address` number. A scan row for the value 1000 reads
+`{"address": 3122112061248, "hex": "E8030000", "value": 1000}`, where `E8030000`
+is 1000 little-endian and not an address at all. Read `address` when you want an
+address; the name is the one that never changes meaning.
+
 **Value types**, case-insensitive: `i8`, `u8`, `i16`, `u16`, `i32`, `u32`,
 `i64`, `u64`, `f32`, `f64`, `bytes`, `str`, `wstr`. The same names the Lua API
 uses.
