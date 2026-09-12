@@ -38,11 +38,11 @@ UiApp::UiApp(HINSTANCE instance, int showCommand)
     uiThreadId_ = std::this_thread::get_id();
     copyText(addDescription_.data(), addDescription_.size(), "Manual entry");
     copyText(addGroup_.data(), addGroup_.size(), "Default");
-    copyText(luaScanScript_.data(), luaScanScript_.size(),
+    luaScanScript_ =
         "return function(ctx)\n"
         "    -- ctx.address, ctx.value, ctx.bytes, ctx.hex, ctx.type\n"
         "    return ctx.value ~= nil and ctx.value > 1000\n"
-        "end\n");
+        "end\n";
     // Registered here rather than in run(), so a script submitted before the
     // first frame still finds a window to talk to.
     services::setUiCommands(this);

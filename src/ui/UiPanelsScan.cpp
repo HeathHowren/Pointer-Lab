@@ -356,6 +356,7 @@ void UiApp::renderScanPanel() {
         // Only the visible rows are laid out; formatting 10,000 rows every
         // frame was a large amount of pointless work. The rows themselves are
         // copied out of the job one screenful at a time.
+        bool openScanResultMenu = false;
         ImGuiListClipper clipper;
         clipper.Begin(static_cast<int>(count));
         while (clipper.Step()) {
@@ -387,7 +388,11 @@ void UiApp::renderScanPanel() {
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(domain::formatValue(type, result.current).c_str());
                 ImGui::TableNextColumn();
-                ImGui::PushID(row);
+                // Keyed by the address, not the row: a scan still filling in,
+                // or a scroll, moves a different result under the same row
+                // index, and the widget state -- an open menu included --
+                // would follow the index rather than the result.
+                ImGui::PushID(reinterpret_cast<const void*>(result.address));
                 if (ImGui::SmallButton("Add")) {
                     services_.addressList().add(result.address, type, "Scan result", "Scan");
                     notifyInfo("Added " + domain::toHex(result.address) + " to the address list.");
@@ -399,27 +404,35 @@ void UiApp::renderScanPanel() {
                 }
                 ImGui::SameLine();
                 if (ImGui::SmallButton("Find...")) {
-                    ImGui::OpenPopup("##find-access-result");
-                }
-                if (ImGui::BeginPopup("##find-access-result")) {
-                    ImGui::TextDisabled("%s", domain::toHex(result.address).c_str());
-                    ImGui::Separator();
-                    if (ImGui::MenuItem("Find out what writes to this address")) {
-                        beginAccessWatch(result.address, type, true);
-                    }
-                    if (ImGui::MenuItem("Find out what accesses this address")) {
-                        beginAccessWatch(result.address, type, false);
-                    }
-                    ImGui::Separator();
-                    // The other direction: not "what touches this value" but
-                    // "what is this value part of".
-                    if (ImGui::MenuItem("Dissect this")) {
-                        dissect(result.address);
-                    }
-                    ImGui::EndPopup();
+                    // The menu is drawn outside the clipper loop so it survives
+                    // its row scrolling off screen; it acts on the address
+                    // captured here, whatever the row shows by then.
+                    scanResultMenuAddress_ = result.address;
+                    openScanResultMenu = true;
                 }
                 ImGui::PopID();
             }
+        }
+        if (openScanResultMenu) {
+            ImGui::OpenPopup("##find-access-result");
+        }
+        if (ImGui::BeginPopup("##find-access-result")) {
+            const auto address = scanResultMenuAddress_;
+            ImGui::TextDisabled("%s", domain::toHex(address).c_str());
+            ImGui::Separator();
+            if (ImGui::MenuItem("Find out what writes to this address")) {
+                beginAccessWatch(address, type, true);
+            }
+            if (ImGui::MenuItem("Find out what accesses this address")) {
+                beginAccessWatch(address, type, false);
+            }
+            ImGui::Separator();
+            // The other direction: not "what touches this value" but "what is
+            // this value part of".
+            if (ImGui::MenuItem("Dissect this")) {
+                dissect(address);
+            }
+            ImGui::EndPopup();
         }
         ImGui::EndTable();
     }

@@ -17,6 +17,7 @@
 
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <imgui_stdlib.h>
 
 #include <algorithm>
 #include <cctype>

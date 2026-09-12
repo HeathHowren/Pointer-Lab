@@ -146,6 +146,23 @@ tool name.
   only refreshed by the UI and contradicted `loadlibrary`'s; both are now
   accurate.
 
+### Fixed (editors and viewers)
+
+- **A script, assembler listing or console input longer than its buffer was
+  cut off without a word.** The four multi-line editors were fixed-size
+  character arrays; a pasted 20 KB script ended at 16 KB and Save wrote the
+  truncated copy back over the original. They now grow with the text.
+
+- **"Find..." on a scan result could act on the wrong address.** The menu was
+  keyed by row number, so a scan still filling in, or a scroll, moved a
+  different result under the open menu. The row is now keyed by its address,
+  the address is captured when the menu opens, and the menu survives its row
+  scrolling out of view.
+
+- **The hex view cursor could wrap.** Paging forward near the top of the
+  address space went through a signed round trip and could land at zero.
+  Both directions now clamp.
+
 ## [3.1.1] — 2026-08-31
 
 No behaviour changes. This exists so the MCP reference that ships beside the

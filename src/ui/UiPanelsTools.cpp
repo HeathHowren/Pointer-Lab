@@ -282,7 +282,7 @@ void UiApp::renderLuaScannerPanel() {
         } else {
             scripting::LuaScanOptions options;
             options.type = valueTypeFromIndex(luaScanTypeIndex_);
-            options.script = luaScanScript_.data();
+            options.script = luaScanScript_;
             options.stride = static_cast<std::size_t>(luaScanStride_);
             options.maxResults = static_cast<std::size_t>(luaScanMaxResults_);
             options.writableOnly = luaScanWritableOnly_;
@@ -298,7 +298,7 @@ void UiApp::renderLuaScannerPanel() {
 
     if (ImGui::BeginTabBar("lua-scanner-tabs")) {
         if (ImGui::BeginTabItem("Predicate")) {
-            ImGui::InputTextMultiline("##lua-scan-script", luaScanScript_.data(), luaScanScript_.size(), ImVec2(-1, -1));
+            ImGui::InputTextMultiline("##lua-scan-script", &luaScanScript_, ImVec2(-1, -1));
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Results")) {
@@ -379,8 +379,8 @@ void UiApp::renderLuaPanel() {
     ImGui::Begin("Lua Console", &showLuaConsole_);
     if (ImGui::CollapsingHeader("API quick reference")) {
         ImGui::TextWrapped(
-            "Target:   processes(), attach(pid), detach(), modules(), regions()\n"
-            "Memory:   read(addr [, type]), write(addr, type, value), read_u32(addr), write_u32(addr, value),\n"
+            "Target:   processes(), attach(pid), detach(), modules(), regions(), refresh()\n"
+            "Memory:   read(addr [, type [, length]]), write(addr, type, value), read_u32(addr), write_u32(addr, value),\n"
             "          read_bytes(addr, n), write_bytes(addr, hex)\n"
             "Scanning: scan_exact(value [, type]), scan_unknown([type]), scan_next(mode [, value]),\n"
             "          scan_wait([ms]), scan_status(), scan_results([max]) -> table, total\n"
@@ -388,7 +388,7 @@ void UiApp::renderLuaPanel() {
             "Table:    add_address(addr [, type, description, group]) -> id\n"
             "Target code: alloc(size), thread(start [, param]), loadlibrary(path)\n"
             "\n"
-            "Types are the same names the UI uses: i8 u8 i16 u16 i32 u32 i64 u64 f32 f64 bytes.\n"
+            "Types are the same names the UI uses: i8 u8 i16 u16 i32 u32 i64 u64 f32 f64 bytes str wstr.\n"
             "Scan modes: exact, unknown, changed, unchanged, increased, decreased.\n"
             "io, package, require, dofile, loadfile and the destructive half of os are removed.\n"
             "Full reference with return values and error behaviour: docs/lua-api.md in the repository.");
@@ -400,12 +400,12 @@ void UiApp::renderLuaPanel() {
     const float splitH = std::max(60.0f, (available - buttonsRowH) * 0.5f);
 
     ImGui::PushFont(monoFont_, monoFont_->LegacySize);
-    ImGui::InputTextMultiline("Lua", luaInput_.data(), luaInput_.size(), ImVec2(-1, splitH));
+    ImGui::InputTextMultiline("Lua", &luaInput_, ImVec2(-1, splitH));
     ImGui::PopFont();
 
     ImGui::BeginDisabled(running);
     if (ImGui::Button("Run Lua")) {
-        if (!lua_.submit(luaInput_.data())) {
+        if (!lua_.submit(luaInput_)) {
             notifyError("A script is already running.");
         }
     }

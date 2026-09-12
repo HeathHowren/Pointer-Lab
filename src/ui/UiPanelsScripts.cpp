@@ -19,9 +19,9 @@ void UiApp::newScriptFromAddress(std::uintptr_t address, const std::vector<std::
     const auto id = services_.autoAssembler().add("Injection at " + domain::toHex(address), source);
     editScriptId_ = id;
     copyText(scriptName_.data(), scriptName_.size(), "Injection at " + domain::toHex(address));
-    copyText(scriptSource_.data(), scriptSource_.size(), source);
+    scriptSource_ = source;
     showScripts_ = true;
-    ImGui::SetWindowFocus("Scripts");
+    focusPanel_ = "Scripts";
     notifyInfo("Started a script from " + domain::toHex(address) +
                ". Read it before turning it on -- the template leaves a gap where your code goes.");
 }
@@ -45,7 +45,7 @@ void UiApp::renderScriptsPanel() {
         const auto id = assembler.add("New script", "[ENABLE]\n\n[DISABLE]\n");
         editScriptId_ = id;
         copyText(scriptName_.data(), scriptName_.size(), "New script");
-        copyText(scriptSource_.data(), scriptSource_.size(), "[ENABLE]\n\n[DISABLE]\n");
+        scriptSource_ = "[ENABLE]\n\n[DISABLE]\n";
     }
     ImGui::SameLine();
     helpMarker(
@@ -101,7 +101,7 @@ void UiApp::renderScriptsPanel() {
             // A dirty editor buffer means Check-and-then-enable would run the
             // saved text, not the text the user just Check-ed. Refusing the
             // toggle is more honest than quietly running the wrong version.
-            const bool dirty = editScriptId_ == script.id && !on && script.source != scriptSource_.data();
+            const bool dirty = editScriptId_ == script.id && !on && script.source != scriptSource_;
             ImGui::BeginDisabled(dirty);
             if (ImGui::Checkbox("##enabled", &on)) {
                 if (auto result = assembler.setEnabled(script.id, on); !result) {
@@ -132,13 +132,13 @@ void UiApp::renderScriptsPanel() {
                 bool discard = true;
                 if (wouldLose) {
                     if (const auto previous = assembler.find(editScriptId_)) {
-                        discard = previous->source == scriptSource_.data();
+                        discard = previous->source == scriptSource_;
                     }
                 }
                 const auto load = [this, id = script.id, name = script.name, src = script.source] {
                     editScriptId_ = id;
                     copyText(scriptName_.data(), scriptName_.size(), name);
-                    copyText(scriptSource_.data(), scriptSource_.size(), src);
+                    scriptSource_ = src;
                 };
                 if (!discard) {
                     confirmAction("Discard unsaved edits?",
@@ -191,7 +191,7 @@ void UiApp::renderScriptsPanel() {
     ImGui::SameLine();
     ImGui::BeginDisabled(editing->enabled);
     if (ImGui::Button("Save")) {
-        if (auto updated = assembler.update(editScriptId_, scriptName_.data(), scriptSource_.data());
+        if (auto updated = assembler.update(editScriptId_, scriptName_.data(), scriptSource_);
             !updated) {
             notifyError(updated.error());
         } else {
@@ -207,7 +207,7 @@ void UiApp::renderScriptsPanel() {
     if (ImGui::Button("Check")) {
         // Compiles without writing anything. Reading a script critically before
         // running it is only possible if you can see what it worked out.
-        auto checked = assembler.check(scriptSource_.data(), true);
+        auto checked = assembler.check(scriptSource_, true);
         if (!checked) {
             notifyError(checked.error());
         } else {
@@ -231,14 +231,14 @@ void UiApp::renderScriptsPanel() {
         auto text = assembler.makeTemplate(shape, 0, {}, {});
         // Templates blow away everything in the editor. The same discard prompt
         // the row selector uses applies here for the same reason.
-        const bool dirty = editing && editing->source != scriptSource_.data();
+        const bool dirty = editing && editing->source != scriptSource_;
         if (dirty) {
             confirmAction("Discard unsaved edits?",
                           "The template replaces the entire editor text. There is no undo.",
                           "Discard and load template",
-                          [this, text] { copyText(scriptSource_.data(), scriptSource_.size(), text); });
+                          [this, text] { scriptSource_ = text; });
         } else {
-            copyText(scriptSource_.data(), scriptSource_.size(), text);
+            scriptSource_ = text;
         }
     };
     ImGui::SameLine();
@@ -255,7 +255,7 @@ void UiApp::renderScriptsPanel() {
     }
 
     ImGui::PushFont(monoFont_, monoFont_->LegacySize);
-    ImGui::InputTextMultiline("##script-source", scriptSource_.data(), scriptSource_.size(), ImVec2(-1, -1),
+    ImGui::InputTextMultiline("##script-source", &scriptSource_, ImVec2(-1, -1),
                               editing->enabled ? ImGuiInputTextFlags_ReadOnly : ImGuiInputTextFlags_None);
     ImGui::PopFont();
 

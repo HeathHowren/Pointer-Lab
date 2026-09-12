@@ -105,11 +105,15 @@ add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp
+    # InputText over a std::string, so the script editors grow with what is
+    # pasted into them instead of silently truncating at a fixed buffer.
+    ${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp
 )
 target_compile_features(imgui PUBLIC cxx_std_20)
 target_include_directories(imgui PUBLIC
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
+    ${imgui_SOURCE_DIR}/misc/cpp
 )
 target_compile_definitions(imgui PUBLIC
     IMGUI_DISABLE_OBSOLETE_FUNCTIONS

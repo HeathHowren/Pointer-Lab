@@ -4,6 +4,9 @@
 #include "ui/UiApp.h"
 #include "ui/UiInternal.h"
 
+#include <cmath>
+#include <limits>
+
 namespace ire::ui {
 
 void UiApp::gotoMemory(std::uintptr_t address) {
@@ -53,31 +56,34 @@ void UiApp::renderMemoryPanel() {
     // window you can only jump to by typing a new address made that a
     // hex-arithmetic exercise instead of a scrolling one.
     const auto window = static_cast<std::uintptr_t>(memoryReadSize_);
-    const auto move = [this](std::intptr_t delta) {
-        // Clamped rather than wrapped: scrolling up from the first page should
-        // stop at zero, not reappear at the top of the address space.
-        if (delta < 0 && memoryCursor_ < static_cast<std::uintptr_t>(-delta)) {
-            memoryCursor_ = 0;
+    // Unsigned throughout, clamped at both ends rather than wrapped: scrolling
+    // up from the first page stops at zero, and scrolling down from the top of
+    // the address space stops there too. The old form went through a signed
+    // round trip, which is undefined for an address with the top bit set.
+    const auto move = [this, window](std::uintptr_t amount, bool forward) {
+        if (forward) {
+            const auto limit = std::numeric_limits<std::uintptr_t>::max() - window;
+            memoryCursor_ = memoryCursor_ > limit - amount ? limit : memoryCursor_ + amount;
         } else {
-            memoryCursor_ = static_cast<std::uintptr_t>(static_cast<std::intptr_t>(memoryCursor_) + delta);
+            memoryCursor_ = memoryCursor_ < amount ? 0 : memoryCursor_ - amount;
         }
         memoryEditOffset_ = -1;
         copyText(memoryAddress_.data(), memoryAddress_.size(), domain::toHex(memoryCursor_));
     };
     if (ImGui::Button("<< page")) {
-        move(-static_cast<std::intptr_t>(window));
+        move(window, false);
     }
     ImGui::SameLine();
     if (ImGui::Button("< row")) {
-        move(-static_cast<std::intptr_t>(bytesPerRow));
+        move(bytesPerRow, false);
     }
     ImGui::SameLine();
     if (ImGui::Button("row >")) {
-        move(static_cast<std::intptr_t>(bytesPerRow));
+        move(bytesPerRow, true);
     }
     ImGui::SameLine();
     if (ImGui::Button("page >>")) {
-        move(static_cast<std::intptr_t>(window));
+        move(window, true);
     }
 
     std::vector<std::uint8_t> bytes;
@@ -122,8 +128,9 @@ void UiApp::renderMemoryPanel() {
                 // The wheel over the hex area moves by rows, which is what
                 // every other hex editor does and therefore what fingers expect.
                 if (ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel != 0.0f) {
-                    const auto rows = static_cast<std::intptr_t>(-ImGui::GetIO().MouseWheel * 3.0f);
-                    move(rows * static_cast<std::intptr_t>(bytesPerRow));
+                    const float wheel = ImGui::GetIO().MouseWheel;
+                    const auto rows = static_cast<std::uintptr_t>(std::fabs(wheel) * 3.0f);
+                    move(rows * bytesPerRow, wheel < 0.0f);
                 }
                 ImGui::PushFont(monoFont_, monoFont_->LegacySize);
                 const float cellWidth = ImGui::CalcTextSize("00 ").x;
@@ -212,7 +219,7 @@ void UiApp::renderMemoryPanel() {
                                     copyText(disasmAddress_.data(), disasmAddress_.size(),
                                              domain::toHex(memoryCursor_ + offset));
                                     showDisassembly_ = true;
-                                    ImGui::SetWindowFocus("Disassembly");
+                                    focusPanel_ = "Disassembly";
                                 }
                                 if (ImGui::MenuItem("Find out what writes here")) {
                                     beginAccessWatch(memoryCursor_ + offset, domain::ValueType::Int32, true);
@@ -362,7 +369,7 @@ void UiApp::renderDisassemblyPanel() {
             ImGui::TextDisabled("Assembled at the Address above, so relative jumps and calls resolve correctly.");
             // Reserve exactly one button row, derived from the frame height
             // rather than the 34 pixels it happens to be at the default font.
-            ImGui::InputTextMultiline("##Assembler", assemblerText_.data(), assemblerText_.size(),
+            ImGui::InputTextMultiline("##Assembler", &assemblerText_,
                                       ImVec2(-1, -ImGui::GetFrameHeightWithSpacing()));
             if (ImGui::Button("Assemble and patch")) {
                 if (!address) {
@@ -370,7 +377,7 @@ void UiApp::renderDisassemblyPanel() {
                 } else if (!services_.session().attached()) {
                     notifyError("Attach to a process before patching it.");
                 } else {
-                    auto assembled = services_.assembler().assemble(assemblerText_.data(), *address,
+                    auto assembled = services_.assembler().assemble(assemblerText_, *address,
                                                                    services_.session().bitness());
                     if (!assembled) {
                         notifyError(assembled.error());

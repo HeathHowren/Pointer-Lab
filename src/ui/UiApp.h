@@ -296,7 +296,9 @@ private:
     bool showScripts_{};
     std::uint64_t editScriptId_{};
     std::array<char, 128> scriptName_{};
-    std::array<char, 16384> scriptSource_{};
+    // A std::string rather than a fixed buffer: a script longer than the
+    // buffer used to be truncated on load and then saved back truncated.
+    std::string scriptSource_;
     bool showStructures_{};
     std::uint64_t structureId_{};
     std::array<char, 128> structureName_{};
@@ -358,6 +360,10 @@ private:
     // from the shared manual-editor field.
     std::array<char, 128> rowWriteValue_{};
     std::uint64_t rowWriteId_{};
+    // The scan result the "Find..." menu was opened on. Captured when the
+    // menu opens, because by the time an item is chosen the row it was
+    // opened from may hold a different result.
+    std::uintptr_t scanResultMenuAddress_{};
 
     // The address list's "Current" column, formatted. Reading it inline meant
     // one ReadProcessMemory per row per frame -- for two hundred entries,
@@ -396,7 +402,7 @@ private:
     std::vector<std::uint8_t> memoryPrevious_;
 
     std::array<char, 64> disasmAddress_{};
-    std::array<char, 2048> assemblerText_{};
+    std::string assemblerText_;
 
     std::array<char, 64> breakpointAddress_{};
     std::array<char, 128> breakpointLabel_{};
@@ -432,7 +438,7 @@ private:
     int luaScanMaxResults_{50000};
     bool luaScanWritableOnly_{};
     bool luaScanExecutableOnly_{};
-    std::array<char, 8192> luaScanScript_{};
+    std::string luaScanScript_;
 
     // Opened on demand: it is meaningless until someone wants an agent driving
     // the session, and it is not something to put in front of a first-time
@@ -441,9 +447,10 @@ private:
     int mcpPort_{8722};
     std::vector<std::string> mcpLog_;
 
-    // Sized to match scriptSource_: a pasted script silently stopped at 4 KB
-    // before, well below every other multiline editor in the app.
-    std::array<char, 16384> luaInput_{};
+    std::string luaInput_;
+    // Capped in renderLuaPanel: the console's own buffer is drained into this
+    // every frame, so without a cap here a chatty script grew it without
+    // bound for as long as the window stayed open.
     std::vector<std::string> luaOutput_;
 
     std::array<char, 128> logFilter_{};
