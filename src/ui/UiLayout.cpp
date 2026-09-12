@@ -120,19 +120,26 @@ void UiApp::applyStyleSizes() {
 void UiApp::renderDockspace() {
     const ImGuiDockNodeFlags dockspaceFlags = ImGuiDockNodeFlags_PassthruCentralNode;
     ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const ImGuiID dockspaceId = ImGui::DockSpaceOverViewport(ImGui::GetID("PointerLabDockspace"), viewport, dockspaceFlags);
+    const ImGuiID dockspaceId = ImGui::GetID("PointerLabDockspace");
 
+    // Rebuilt *before* the dockspace is submitted for this frame. Doing it
+    // afterwards tore the node out from under a dockspace already laid out,
+    // so every panel spent one frame floating before snapping into place.
     const bool needsFirstLayout = !dockLayoutInitialized_ && !std::filesystem::exists(infra::Paths::layoutFile());
     if (resetDockLayout_ || needsFirstLayout) {
-        // Reset Layout has to reopen closed panels too. Restoring the default
+        // Reset Layout has to reopen closed panels too -- all of them, since
+        // every panel has a home in the default layout. Restoring the
         // arrangement while leaving half the windows hidden is not the default
         // arrangement, and it leaves the user with no way back.
         showMemoryViewer_ = showDisassembly_ = showBreakpoints_ = true;
         showModules_ = showMemoryRegions_ = showLogs_ = true;
         showPointerScanner_ = showLuaScanner_ = showInjection_ = showLuaConsole_ = true;
+        showAccessWatch_ = showPatches_ = showSymbols_ = showScripts_ = true;
+        showStructures_ = showSpeed_ = showMcp_ = true;
         buildDefaultDockLayout(dockspaceId, viewport->WorkSize);
         resetDockLayout_ = false;
     }
+    ImGui::DockSpaceOverViewport(dockspaceId, viewport, dockspaceFlags);
     dockLayoutInitialized_ = true;
 }
 

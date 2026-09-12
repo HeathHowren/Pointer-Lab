@@ -36,7 +36,7 @@ void UiApp::dissect(std::uintptr_t address) {
         const auto count = structureAddressList().size();
         if (count >= engine_struct::Dissector::maxAddresses) {
             showStructures_ = true;
-            ImGui::SetWindowFocus("Structures");
+            focusPanel_ = "Structures";
             notifyError("At most " +
                         std::to_string(engine_struct::Dissector::maxAddresses) +
                         " addresses can be compared side by side. Remove one before adding another.");
@@ -50,7 +50,7 @@ void UiApp::dissect(std::uintptr_t address) {
     }
 
     showStructures_ = true;
-    ImGui::SetWindowFocus("Structures");
+    focusPanel_ = "Structures";
     notifyInfo("Added " + text + " to the structure view. Add a second instance of the same kind of object "
                "and press Guess: the fields that differ between them are the ones worth naming.");
 }
@@ -186,7 +186,7 @@ void UiApp::renderStructuresPanel() {
     }
 
     // Addresses and the guess pass.
-    ImGui::SetNextItemWidth(-260.0f);
+    ImGui::SetNextItemWidth(-scaled(260.0f));
     ImGui::InputTextWithHint("##structure-addresses", "addresses, comma separated",
                              structureAddresses_.data(), structureAddresses_.size());
     ImGui::SameLine();

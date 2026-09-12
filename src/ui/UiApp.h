@@ -538,12 +538,20 @@ private:
     std::thread::id uiThreadId_{};
     // Applied during the frame rather than at drain time: ImGui's focus call
     // belongs between NewFrame and Render.
+    // The one way a panel gets focus. Set by whoever wants it and applied at
+    // the end of the frame, after every panel has been submitted, so it works
+    // for a panel that was closed a moment ago and is being opened by the same
+    // click. The last writer in a frame wins, which has not mattered yet: no
+    // single action asks for two panels.
     std::string focusPanel_;
     std::filesystem::path startupScript_;
     bool startupScriptSubmitted_{};
     bool startMcpOnLaunch_{};
     std::uint16_t startupMcpPort_{};
     bool quitRequested_{};
+    // A file dialog asked for during the frame, opened by run() after it.
+    enum class PendingFileDialog { None, Open, SaveAs };
+    PendingFileDialog pendingFileDialog_{PendingFileDialog::None};
 
     // Last time the "did the target process exit under us?" check ran. Cheap
     // enough to do once a second; done every frame it would take the session

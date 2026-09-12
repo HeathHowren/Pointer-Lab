@@ -19,14 +19,14 @@ void UiApp::renderMenu() {
             newProject();
         }
         if (ImGui::MenuItem("Open project...")) {
-            openProjectDialog();
+            pendingFileDialog_ = PendingFileDialog::Open;
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Save project")) {
             saveProject();
         }
         if (ImGui::MenuItem("Save project as...")) {
-            saveProjectAs();
+            pendingFileDialog_ = PendingFileDialog::SaveAs;
         }
         ImGui::Separator();
         ImGui::TextDisabled("%s", projectTitle().c_str());
@@ -132,7 +132,7 @@ void UiApp::renderCommandBar() {
         ImGuiWindowFlags_NoSavedSettings |
         ImGuiWindowFlags_NoDocking;
 
-    const bool visible = ImGui::BeginViewportSideBar("##CommandBar", viewport, ImGuiDir_Up, 42.0f, flags);
+    const bool visible = ImGui::BeginViewportSideBar("##CommandBar", viewport, ImGuiDir_Up, scaled(42.0f), flags);
     if (!visible) {
         ImGui::End();
         return;

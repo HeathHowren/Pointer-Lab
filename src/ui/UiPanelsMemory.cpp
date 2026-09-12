@@ -464,7 +464,7 @@ void UiApp::renderBreakpointPanel() {
     ImGui::SetNextItemWidth(scaled(210.0f));
     ImGui::InputTextWithHint("Address", "0x7FF... or client.dll+0x4A2C10", breakpointAddress_.data(), breakpointAddress_.size());
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(-60.0f);
+    ImGui::SetNextItemWidth(-scaled(60.0f));
     ImGui::InputTextWithHint("Label", "optional name", breakpointLabel_.data(), breakpointLabel_.size());
 
     static constexpr std::array<domain::BreakpointKind, 4> breakpointKinds{

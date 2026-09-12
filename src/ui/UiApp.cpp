@@ -18,6 +18,7 @@
 #include <imgui_internal.h>
 
 #include <algorithm>
+#include <utility>
 #include <chrono>
 #include <cctype>
 #include <cstring>
@@ -183,6 +184,20 @@ int UiApp::run() {
         if (quitRequested_) {
             quitRequested_ = false;
             PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+        }
+
+        // File dialogs run their own message loop for as long as they are
+        // open. Opening one from a menu item ran that loop in the middle of
+        // an ImGui frame, so the dialog's paint and resize messages re-entered
+        // the window procedure against a half-built frame. The menu only
+        // records the request; it is honoured here, between frames.
+        if (pendingFileDialog_ != PendingFileDialog::None) {
+            const auto dialog = std::exchange(pendingFileDialog_, PendingFileDialog::None);
+            if (dialog == PendingFileDialog::Open) {
+                openProjectDialog();
+            } else {
+                saveProjectAs();
+            }
         }
     }
 
@@ -485,8 +500,10 @@ void UiApp::render() {
     renderConfirmModal();
     renderToasts();
 
-    // Focus has to be asked for between NewFrame and Render, so a select_panel
-    // handled at the top of this frame lands here.
+    // Focus has to be asked for between NewFrame and Render, and after the
+    // window in question has been submitted this frame -- which is why every
+    // panel sets focusPanel_ rather than calling SetWindowFocus itself. A
+    // select_panel handled at the top of this frame lands here too.
     if (!focusPanel_.empty()) {
         ImGui::SetWindowFocus(focusPanel_.c_str());
         focusPanel_.clear();
@@ -673,7 +690,10 @@ void UiApp::notifyError(const std::string& text) {
 }
 
 void UiApp::renderToasts() {
-    const float delta = ImGui::GetIO().DeltaTime;
+    // Capped: a file dialog or a dragged window stalls the frame loop for
+    // seconds, and the one long DeltaTime that follows used to expire every
+    // toast at once, including the one confirming what the dialog just did.
+    const float delta = std::min(ImGui::GetIO().DeltaTime, 0.1f);
     for (auto& toast : toasts_) {
         toast.secondsRemaining -= delta;
     }
@@ -687,7 +707,7 @@ void UiApp::renderToasts() {
     }
 
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const float padding = 16.0f;
+    const float padding = scaled(16.0f);
     float offsetY = padding;
 
     for (std::size_t i = 0; i < toasts_.size(); ++i) {
@@ -711,10 +731,10 @@ void UiApp::renderToasts() {
             ImGui::PushStyleColor(ImGuiCol_Text, accent);
             ImGui::TextUnformatted(toast.error ? "Error" : "Done");
             ImGui::PopStyleColor();
-            ImGui::PushTextWrapPos(480.0f);
+            ImGui::PushTextWrapPos(scaled(480.0f));
             ImGui::TextUnformatted(toast.text.c_str());
             ImGui::PopTextWrapPos();
-            offsetY += ImGui::GetWindowHeight() + 8.0f;
+            offsetY += ImGui::GetWindowHeight() + scaled(8.0f);
         }
         ImGui::End();
         ImGui::PopStyleVar();
@@ -755,7 +775,7 @@ void UiApp::renderConfirmModal() {
         ImGui::TextUnformatted(pendingConfirm_->title.c_str());
         ImGui::PopStyleColor();
         ImGui::Separator();
-        ImGui::PushTextWrapPos(600.0f);
+        ImGui::PushTextWrapPos(scaled(600.0f));
         ImGui::TextUnformatted(pendingConfirm_->message.c_str());
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0.0f, scaled(6.0f)));

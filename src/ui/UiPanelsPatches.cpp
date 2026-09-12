@@ -136,7 +136,7 @@ void UiApp::renderPatchesPanel() {
             if (ImGui::SmallButton("Show")) {
                 copyText(disasmAddress_.data(), disasmAddress_.size(), domain::toHex(patch.address));
                 showDisassembly_ = true;
-                ImGui::SetWindowFocus("Disassembly");
+                focusPanel_ = "Disassembly";
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("Remove")) {

@@ -106,7 +106,7 @@ void UiApp::renderSpeedPanel() {
     }
     ImGui::NewLine();
 
-    ImGui::SetNextItemWidth(-160.0f);
+    ImGui::SetNextItemWidth(-scaled(160.0f));
     ImGui::SliderFloat("##speed", &speedScale_, static_cast<float>(engine_speed::SpeedController::minScale),
                        static_cast<float>(engine_speed::SpeedController::maxScale), "%.2fx",
                        ImGuiSliderFlags_Logarithmic);
@@ -177,7 +177,7 @@ void UiApp::renderSpeedPanel() {
     ImGui::SetNextItemWidth(scaled(200.0f));
     ImGui::InputTextWithHint("##trainer-name", "trainer name", trainerName_.data(), trainerName_.size());
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(-120.0f);
+    ImGui::SetNextItemWidth(-scaled(120.0f));
     ImGui::InputTextWithHint("##trainer-dir", "output directory", trainerDirectory_.data(),
                              trainerDirectory_.size());
     ImGui::SameLine();

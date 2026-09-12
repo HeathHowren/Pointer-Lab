@@ -145,7 +145,7 @@ void UiApp::renderScanPanel() {
     ImGui::Combo("Mode", &scanModeIndex_, modeNames.data(), static_cast<int>(modeNames.size()));
     ImGui::SameLine();
     ImGui::BeginDisabled(!wantsValue);
-    ImGui::SetNextItemWidth(wantsSecond ? 150.0f : -1.0f);
+    ImGui::SetNextItemWidth(wantsSecond ? scaled(150.0f) : -1.0f);
     ImGui::InputTextWithHint("##scan-value", domain::isStringType(type) ? "text to find" : "value or byte pattern",
                              scanText_.data(), scanText_.size());
     if (wantsSecond) {

@@ -31,7 +31,7 @@ void UiApp::beginAccessWatch(std::uintptr_t address, domain::ValueType type, boo
 
     accessWatchDetail_ = 0;
     showAccessWatch_ = true;
-    ImGui::SetWindowFocus("Access Watch");
+    focusPanel_ = "Access Watch";
     notifyInfo(std::string(writesOnly ? "Watching writes to " : "Watching accesses of ") + domain::toHex(address) +
                ". Make the value change in the target, then look at the list.");
 }
@@ -157,7 +157,7 @@ void UiApp::renderAccessWatchPanel() {
                 std::snprintf(disasmAddress_.data(), disasmAddress_.size(), "%s",
                               domain::toHex(site.address).c_str());
                 showDisassembly_ = true;
-                ImGui::SetWindowFocus("Disassembly");
+                focusPanel_ = "Disassembly";
             }
             ImGui::SameLine();
             // Disabled rather than hidden when the instruction is unknown:

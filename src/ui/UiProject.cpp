@@ -195,7 +195,8 @@ infra::Result<void> UiApp::loadProjectFrom(const std::filesystem::path& path, bo
 
 void UiApp::saveProject() {
     if (projectPath_.empty()) {
-        saveProjectAs();
+        // Deferred to run(), like the menu's own Save As: see the note there.
+        pendingFileDialog_ = PendingFileDialog::SaveAs;
         return;
     }
     // Already reported through the toast channel inside; the Result is for the

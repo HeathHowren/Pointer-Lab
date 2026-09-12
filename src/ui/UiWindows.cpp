@@ -13,7 +13,7 @@ void UiApp::renderAboutWindow() {
         ImGui::TextUnformatted(POINTERLAB_PRODUCT_NAME " " POINTERLAB_VERSION_STRING);
         ImGui::TextDisabled("Windows x64 user-mode memory research tool");
         ImGui::Separator();
-        ImGui::PushTextWrapPos(680.0f);
+        ImGui::PushTextWrapPos(scaled(680.0f));
         ImGui::TextUnformatted(
             "Pointer Lab is free software licensed under the GNU General Public License, "
             "version 2. It is GPL licensed because it statically links Keystone.");

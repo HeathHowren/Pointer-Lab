@@ -196,6 +196,28 @@ tool name.
   sixty frames a second. Anything that changes on its own -- a scan, a
   script, a debugger, an agent on the MCP socket -- keeps the full rate.
 
+### Changed (window and layout)
+
+- **Reset Layout reopens every panel**, not just the ten that start open:
+  Access Watch, Patches, Symbols, Scripts, Structures, Speed and Export and
+  MCP Server come back to their homes too. The layout is rebuilt before the
+  dockspace is submitted, so the panels no longer spend a frame floating.
+
+- **File dialogs open between frames.** Open and Save As from the menu ran
+  the dialog's own message loop in the middle of an ImGui frame. The menu now
+  records the request and the frame loop opens the dialog after the frame.
+  A toast no longer expires the instant a dialog closes, either: the long
+  frame that follows a modal is capped at a tenth of a second for timing.
+
+- **Every remaining pixel size scales with the display**: the command bar
+  height, the second scan value box, the right-aligned widths in Structures,
+  Speed, Symbols and Breakpoints, and the toast, confirmation and About text
+  wrap widths. On a 150% display the command bar used to clip its buttons.
+
+- **One focus mechanism.** The five places that focused a panel directly now
+  go through the same deferred request the MCP `select_panel` tool uses, so
+  focusing a panel that the same click just opened works every time.
+
 ## [3.1.1] — 2026-08-31
 
 No behaviour changes. This exists so the MCP reference that ships beside the

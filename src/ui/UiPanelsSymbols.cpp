@@ -71,7 +71,7 @@ void UiApp::renderSymbolsPanel() {
     ImGui::SetNextItemWidth(scaled(160.0f));
     ImGui::InputTextWithHint("##symbol-name", "name", symbolName_.data(), symbolName_.size());
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(-90.0f);
+    ImGui::SetNextItemWidth(-scaled(90.0f));
     const bool submitted =
         ImGui::InputTextWithHint("##symbol-expression", "client.dll+0x4A2C10", symbolExpression_.data(),
                                  symbolExpression_.size(), ImGuiInputTextFlags_EnterReturnsTrue);
