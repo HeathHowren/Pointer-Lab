@@ -71,6 +71,33 @@ tool name.
   `FreeLibrary`, rather than leaving the game's import table pointing into an
   unmapped module.
 
+- **Software breakpoints killed a 32-bit target on the first hit.** A 32-bit
+  thread's `int3` and single step reach a 64-bit debugger as
+  `STATUS_WX86_BREAKPOINT` and `STATUS_WX86_SINGLE_STEP`, not the native codes
+  the debugger was matching, so the trap was passed through to a target with
+  no handler for it. Both codes are now recognised. Covered by new 32-bit
+  software and hardware breakpoint tests.
+
+- **A thread that exited mid-step disarmed its breakpoint for good.** Between
+  hitting the `int3` and taking the single step that re-arms it, the original
+  byte is in memory. A thread that died in that window never took the step,
+  so the breakpoint silently stopped firing while still listed as enabled --
+  and the stale "stepping" record made detach skip restoring the byte, which
+  could leave an `int3` behind in the target. Thread exits are now handled:
+  the breakpoint is re-armed unless another thread is still stepping over it.
+
+- **The debugger closed its process handle while a breakpoint call could
+  still be using it.** Teardown now happens under the same lock that
+  `addBreakpoint` and `removeBreakpoint` hold, and both refuse once the
+  debugger is gone.
+
+- **Module, process and thread lists could come back empty while the target
+  was changing.** `CreateToolhelp32Snapshot` reports `ERROR_BAD_LENGTH` when
+  the list changes under it and asks to be called again; the snapshot is now
+  retried. For hardware breakpoints this mattered most: an empty thread list
+  meant the debug registers were programmed on no thread at all and the
+  breakpoint never fired.
+
 ## [3.1.1] — 2026-08-31
 
 No behaviour changes. This exists so the MCP reference that ships beside the

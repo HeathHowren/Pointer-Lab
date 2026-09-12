@@ -195,6 +195,14 @@ private:
     // held. handleSoftwareStep returns whether the exception was ours.
     HardwareVerdict handleHardwareHit(std::uint32_t threadId, domain::BreakpointInfo& snapshot);
     bool handleSoftwareStep(std::map<std::uint32_t, std::uintptr_t>::iterator stepping);
+    // A thread that exits mid-step leaves its breakpoint disarmed forever
+    // unless someone puts the int3 back on its behalf.
+    void handleThreadExit(std::uint32_t threadId);
+    // Both expect mutex_ to be held. steppingOverLocked says whether any thread
+    // currently has the original byte restored at that address; rearmLocked
+    // writes the int3 back if the breakpoint is still enabled.
+    [[nodiscard]] bool steppingOverLocked(std::uintptr_t address) const;
+    void rearmLocked(std::uintptr_t address);
     bool rewindThread(std::uintptr_t address, std::uint32_t threadId) const;
     void disarmAll();
     void drainPendingEvents();

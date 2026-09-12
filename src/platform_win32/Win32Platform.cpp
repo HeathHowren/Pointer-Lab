@@ -13,6 +13,33 @@
 
 namespace ire::platform_win32 {
 
+namespace {
+
+// CreateToolhelp32Snapshot fails with ERROR_BAD_LENGTH when the list it is
+// copying changes under it -- a target loading a DLL or starting a thread --
+// and the documentation says to simply try again. Without the retry a module
+// list came back empty at exactly the moment it mattered most.
+UniqueHandle createSnapshotWithRetry(DWORD flags, DWORD pid, const char* what) {
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        HANDLE raw = CreateToolhelp32Snapshot(flags, pid);
+        if (raw != INVALID_HANDLE_VALUE && raw != nullptr) {
+            return UniqueHandle(raw);
+        }
+        const DWORD error = GetLastError();
+        if (error != ERROR_BAD_LENGTH) {
+            infra::Logger::instance().warn(std::string("Could not snapshot the ") + what + ": " +
+                                           Win32Platform::formatLastError(error));
+            return UniqueHandle{};
+        }
+        Sleep(1);
+    }
+    infra::Logger::instance().warn(std::string("Could not snapshot the ") + what +
+                                   ": the list kept changing (ERROR_BAD_LENGTH).");
+    return UniqueHandle{};
+}
+
+} // namespace
+
 UniqueHandle::~UniqueHandle() {
     reset();
 }
@@ -41,7 +68,7 @@ HANDLE UniqueHandle::release() {
 
 std::vector<domain::ProcessInfo> Win32Platform::listProcesses() const {
     std::vector<domain::ProcessInfo> processes;
-    UniqueHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+    UniqueHandle snapshot = createSnapshotWithRetry(TH32CS_SNAPPROCESS, 0, "process list");
     if (!snapshot) {
         return processes;
     }
@@ -64,7 +91,7 @@ std::vector<domain::ProcessInfo> Win32Platform::listProcesses() const {
 
 std::vector<domain::ModuleInfo> Win32Platform::listModules(std::uint32_t pid) const {
     std::vector<domain::ModuleInfo> modules;
-    UniqueHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid));
+    UniqueHandle snapshot = createSnapshotWithRetry(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid, "module list");
     if (!snapshot) {
         return modules;
     }
@@ -488,6 +515,20 @@ constexpr DWORD trapFlag = 0x100;
 // instruction breakpoints for exactly one instruction and the CPU clears it
 // again afterwards.
 constexpr DWORD resumeFlag = 0x10000;
+// What a 32-bit thread's int3 and trap-flag step look like to a 64-bit
+// debugger. They arrive first-chance under these codes rather than the native
+// ones, and a pump that only knew the native codes passed them through to a
+// target that had no handler for them.
+constexpr DWORD wx86Breakpoint = 0x4000001FUL; // STATUS_WX86_BREAKPOINT
+constexpr DWORD wx86SingleStep = 0x4000001EUL; // STATUS_WX86_SINGLE_STEP
+
+bool isBreakpointCode(DWORD code, bool wow64) {
+    return code == EXCEPTION_BREAKPOINT || (wow64 && code == wx86Breakpoint);
+}
+
+bool isSingleStepCode(DWORD code, bool wow64) {
+    return code == EXCEPTION_SINGLE_STEP || (wow64 && code == wx86SingleStep);
+}
 // There are four of them, and that is a property of the CPU.
 constexpr int debugSlotCount = 4;
 // DR6 bits 0-3: which debug register caused this exception.
@@ -519,7 +560,7 @@ DWORD64 lengthBits(std::uint8_t length) {
 // one of them has to be programmed for a breakpoint to be reliable.
 std::vector<std::uint32_t> threadIdsOf(std::uint32_t pid) {
     std::vector<std::uint32_t> ids;
-    UniqueHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0));
+    UniqueHandle snapshot = createSnapshotWithRetry(TH32CS_SNAPTHREAD, 0, "thread list");
     if (!snapshot) {
         return ids;
     }
@@ -843,12 +884,15 @@ void DebugEventPump::run(std::promise<infra::Result<void>> ready) {
         DebugActiveProcessStop(pid_);
     }
     {
+        // Under the lock: addBreakpoint and removeBreakpoint use process_ while
+        // holding it, and closing the handle out from under them handed the
+        // platform a dead -- or worse, recycled -- handle.
         std::scoped_lock lock(mutex_);
         stepping_.clear();
         disarmed_.clear();
+        attached_ = false;
+        process_.reset();
     }
-    attached_ = false;
-    process_.reset();
     infra::Logger::instance().info("Debugger detached.");
 }
 
@@ -872,7 +916,7 @@ void DebugEventPump::loop() {
             const auto& record = event.u.Exception.ExceptionRecord;
             const auto address = reinterpret_cast<std::uintptr_t>(record.ExceptionAddress);
 
-            if (record.ExceptionCode == EXCEPTION_BREAKPOINT) {
+            if (isBreakpointCode(record.ExceptionCode, wow64_)) {
                 if (handleBreakpoint(address, event.dwThreadId)) {
                     continueStatus = DBG_CONTINUE;
                 } else if (!sawInitialBreakpoint) {
@@ -885,7 +929,7 @@ void DebugEventPump::loop() {
                     // Someone else's int3. It belongs to the target.
                     continueStatus = DBG_EXCEPTION_NOT_HANDLED;
                 }
-            } else if (record.ExceptionCode == EXCEPTION_SINGLE_STEP) {
+            } else if (isSingleStepCode(record.ExceptionCode, wow64_)) {
                 continueStatus = handleSingleStep(event.dwThreadId) ? DBG_CONTINUE : DBG_EXCEPTION_NOT_HANDLED;
             } else {
                 // Every other exception is the target's own business.
@@ -893,6 +937,9 @@ void DebugEventPump::loop() {
             }
             break;
         }
+        case EXIT_THREAD_DEBUG_EVENT:
+            handleThreadExit(event.dwThreadId);
+            break;
         case CREATE_PROCESS_DEBUG_EVENT:
             // This file handle is the debugger's to close. Leaking one per
             // attach kept the target's image file locked.
@@ -1215,24 +1262,56 @@ bool DebugEventPump::handleSoftwareStep(std::map<std::uint32_t, std::uintptr_t>:
     // The original instruction has now executed, so put the trap back. This is
     // what makes a breakpoint fire more than once. The CPU has already cleared
     // the trap flag for us as part of raising this exception.
-    auto entry = breakpoints_.find(address);
-    if (entry != breakpoints_.end() && entry->second.enabled) {
-        if (auto armed = writeByte(address, int3); !armed) {
-            infra::Logger::instance().error("Could not re-arm the breakpoint at " + domain::toHex(address) + ": " +
-                                            armed.error());
-            breakpoints_.erase(entry);
-        }
-    }
+    rearmLocked(address);
     return true;
+}
+
+void DebugEventPump::handleThreadExit(std::uint32_t threadId) {
+    std::scoped_lock lock(mutex_);
+    auto stepping = stepping_.find(threadId);
+    if (stepping == stepping_.end()) {
+        return;
+    }
+    // The thread died between hitting the breakpoint and taking its single
+    // step. The original byte is in memory and nothing will ever raise the
+    // step that would put the int3 back, so the breakpoint silently stopped
+    // firing -- and the stale entry here made removal skip the restore for
+    // good. Another thread may be stepping over the same address right now,
+    // in which case its own step will re-arm it and writing 0xCC under it
+    // would be wrong.
+    const auto address = stepping->second;
+    stepping_.erase(stepping);
+    if (!steppingOverLocked(address)) {
+        rearmLocked(address);
+    }
+}
+
+bool DebugEventPump::steppingOverLocked(std::uintptr_t address) const {
+    return std::any_of(stepping_.begin(), stepping_.end(),
+                       [address](const auto& pair) { return pair.second == address; });
+}
+
+void DebugEventPump::rearmLocked(std::uintptr_t address) {
+    auto entry = breakpoints_.find(address);
+    if (entry == breakpoints_.end() || !entry->second.enabled) {
+        return;
+    }
+    if (auto armed = writeByte(address, int3); !armed) {
+        infra::Logger::instance().error("Could not re-arm the breakpoint at " + domain::toHex(address) + ": " +
+                                        armed.error());
+        breakpoints_.erase(entry);
+    }
 }
 
 infra::Result<void> DebugEventPump::addBreakpoint(std::uintptr_t address, std::string label,
                                                   domain::BreakpointKind kind, std::uint8_t length) {
+    std::scoped_lock lock(mutex_);
+    // Checked under the lock: the pump's own exit path clears attached_ and
+    // closes process_ while holding it, so this cannot see a half-torn-down
+    // pump.
     if (!attached_) {
         return infra::Result<void>::fail("The debugger is not attached.");
     }
-
-    std::scoped_lock lock(mutex_);
     if (breakpoints_.count(address) != 0) {
         return infra::Result<void>::fail("There is already a breakpoint at " + domain::toHex(address) + ".");
     }
@@ -1308,6 +1387,9 @@ infra::Result<void> DebugEventPump::addHardwareBreakpoint(std::uintptr_t address
 
 infra::Result<void> DebugEventPump::removeBreakpoint(std::uintptr_t address) {
     std::scoped_lock lock(mutex_);
+    if (!attached_) {
+        return infra::Result<void>::fail("The debugger is not attached.");
+    }
 
     auto entry = breakpoints_.find(address);
     if (entry == breakpoints_.end()) {
@@ -1325,8 +1407,7 @@ infra::Result<void> DebugEventPump::removeBreakpoint(std::uintptr_t address) {
     // Erase first: if a thread is mid-step over this address, handleSingleStep
     // must not find it and re-arm it behind us.
     const auto originalByte = entry->second.originalByte;
-    const bool steppingOver = std::any_of(stepping_.begin(), stepping_.end(),
-                                          [address](const auto& pair) { return pair.second == address; });
+    const bool steppingOver = steppingOverLocked(address);
     breakpoints_.erase(entry);
     // A thread may have executed the trap moments ago and its exception may
     // still be in flight; that event is ours to absorb, not the target's.
@@ -1363,9 +1444,7 @@ void DebugEventPump::disarmAll() {
             continue;
         }
         // A thread stepping over this one already has the original byte back.
-        const bool steppingOver = std::any_of(stepping_.begin(), stepping_.end(),
-                                              [addr = address](const auto& pair) { return pair.second == addr; });
-        if (!steppingOver) {
+        if (!steppingOverLocked(address)) {
             if (auto restored = writeByte(address, info.originalByte); !restored) {
                 infra::Logger::instance().error("Could not remove the breakpoint at " + domain::toHex(address) +
                                                 "; the target still contains an int3: " + restored.error());
@@ -1402,17 +1481,20 @@ void DebugEventPump::drainPendingEvents() {
         case EXCEPTION_DEBUG_EVENT: {
             const auto& record = event.u.Exception.ExceptionRecord;
             const auto address = reinterpret_cast<std::uintptr_t>(record.ExceptionAddress);
-            if (record.ExceptionCode == EXCEPTION_BREAKPOINT) {
+            if (isBreakpointCode(record.ExceptionCode, wow64_)) {
                 if (!handleBreakpoint(address, event.dwThreadId)) {
                     continueStatus = DBG_EXCEPTION_NOT_HANDLED;
                 }
-            } else if (record.ExceptionCode == EXCEPTION_SINGLE_STEP) {
+            } else if (isSingleStepCode(record.ExceptionCode, wow64_)) {
                 continueStatus = handleSingleStep(event.dwThreadId) ? DBG_CONTINUE : DBG_EXCEPTION_NOT_HANDLED;
             } else {
                 continueStatus = DBG_EXCEPTION_NOT_HANDLED;
             }
             break;
         }
+        case EXIT_THREAD_DEBUG_EVENT:
+            handleThreadExit(event.dwThreadId);
+            break;
         case CREATE_PROCESS_DEBUG_EVENT:
             if (event.u.CreateProcessInfo.hFile != nullptr) {
                 CloseHandle(event.u.CreateProcessInfo.hFile);

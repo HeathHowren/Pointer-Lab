@@ -19,6 +19,7 @@
 #include "engine_pointer/PointerScanner.h"
 #include "engine_scan/MemoryScanner.h"
 #include "engine_symbols/ExportResolver.h"
+#include "services/RuntimeServices.h"
 
 #include <algorithm>
 #include <chrono>
@@ -60,6 +61,27 @@ bool waitForPointerScan(engine_pointer::PointerScanJob& job,
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     return false;
+}
+
+bool waitForHits(services::BreakpointService& service, std::uintptr_t address, std::uint64_t wanted,
+                 std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        for (const auto& breakpoint : service.breakpoints()) {
+            if (breakpoint.address == address && breakpoint.hitCount >= wanted) {
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
+
+std::uint8_t readByte(domain::TargetSession& session, std::uintptr_t address) {
+    auto bytes = session.readBytes(address, 1);
+    REQUIRE(bytes.has_value());
+    REQUIRE(bytes.value().size() == 1);
+    return bytes.value().front();
 }
 
 engine_scan::ScanOptions testOptions() {
@@ -263,4 +285,70 @@ TEST_CASE("An unknown export and an unloaded module fail with a clear message", 
     auto absent = resolver.resolve(fixture.session, L"definitely_not_loaded.dll", "Anything");
     REQUIRE_FALSE(absent.has_value());
     CHECK(absent.error().find("not loaded") != std::string::npos);
+}
+
+// A 32-bit thread's int3 reaches a 64-bit debugger as STATUS_WX86_BREAKPOINT,
+// not EXCEPTION_BREAKPOINT. Before the pump learned that code it passed the
+// trap through to a target with no handler for it, and the helper died on
+// the first hit.
+TEST_CASE("A software breakpoint fires in a 32-bit target", "[wow64][breakpoint][integration]") {
+    requireHelper32();
+    testsupport::AttachedHelper fixture(HelperBitness::X86);
+    services::BreakpointService breakpoints(fixture.session);
+
+    const auto tick = fixture.helper.tick();
+    const auto original = readByte(fixture.session, tick);
+    const auto ticksBefore = fixture.helper.ticks();
+    REQUIRE(ticksBefore >= 0);
+
+    REQUIRE(breakpoints.attachDebugger().has_value());
+    auto added = breakpoints.addBreakpoint(tick, "tick");
+    INFO("add: " << added.error());
+    REQUIRE(added.has_value());
+    REQUIRE(waitForHits(breakpoints, tick, 25));
+
+    const auto list = breakpoints.breakpoints();
+    REQUIRE(list.size() == 1);
+    REQUIRE(list[0].lastHit.captured);
+    // The 32-bit context, not the wow64cpu thunk's 64-bit one.
+    CHECK(list[0].lastHit.bitness == domain::Bitness::X86);
+    CHECK(list[0].lastHit.rip == tick);
+    CHECK(list[0].lastHit.rip < 0x100000000ULL);
+
+    const auto ticksDuring = fixture.helper.ticks();
+    CHECK(ticksDuring > ticksBefore);
+
+    breakpoints.detachDebugger();
+    CHECK(readByte(fixture.session, tick) == original);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(fixture.helper.get() == testsupport::needleValue);
+    CHECK(fixture.helper.ticks() > ticksDuring);
+}
+
+TEST_CASE("A hardware breakpoint fires in a 32-bit target", "[wow64][breakpoint][hardware][integration]") {
+    requireHelper32();
+    testsupport::AttachedHelper fixture(HelperBitness::X86);
+    services::BreakpointService breakpoints(fixture.session);
+
+    const auto tick = fixture.helper.tick();
+    const auto original = readByte(fixture.session, tick);
+    const auto ticksBefore = fixture.helper.ticks();
+
+    REQUIRE(breakpoints.attachDebugger().has_value());
+    auto added = breakpoints.addBreakpoint(tick, "tick", domain::BreakpointKind::HardwareExecute);
+    INFO("add: " << added.error());
+    REQUIRE(added.has_value());
+    REQUIRE(waitForHits(breakpoints, tick, 25));
+
+    CHECK(readByte(fixture.session, tick) == original);
+    const auto list = breakpoints.breakpoints();
+    REQUIRE(list.size() == 1);
+    REQUIRE(list[0].lastHit.captured);
+    CHECK(list[0].lastHit.bitness == domain::Bitness::X86);
+    CHECK(list[0].lastHit.rip == tick);
+    CHECK(fixture.helper.ticks() > ticksBefore);
+
+    breakpoints.detachDebugger();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(fixture.helper.get() == testsupport::needleValue);
 }

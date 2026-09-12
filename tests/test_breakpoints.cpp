@@ -157,6 +157,40 @@ TEST_CASE("Repeated attach and detach cycles leave the target healthy", "[breakp
     }
 }
 
+// Regression: a thread that exited between hitting the int3 and taking its
+// single step left a stale "stepping" entry behind. The breakpoint was never
+// re-armed, so it silently stopped firing, and detach then skipped the
+// restore because it believed a thread was still mid-step -- which is how a
+// permanent 0xCC could be left in the target.
+TEST_CASE("A breakpoint survives threads that exit while stepping over it", "[breakpoint][integration]") {
+    AttachedHelper fixture;
+    services::BreakpointService breakpoints(fixture.session);
+
+    const auto tick = fixture.helper.tick();
+    const auto original = readByte(fixture.session, tick);
+
+    REQUIRE(breakpoints.attachDebugger().has_value());
+    REQUIRE(breakpoints.addBreakpoint(tick, "tick").has_value());
+    REQUIRE(waitForHits(breakpoints, tick, 5));
+
+    // Each spawned thread hits the breakpoint a thousand times and then dies.
+    // With this many of them, some die inside the step window.
+    for (int i = 0; i < 40; ++i) {
+        REQUIRE(fixture.helper.spawn());
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    // The long-lived worker must still be tripping it afterwards.
+    const auto hitsAfterSpawns = breakpoints.breakpoints().front().hitCount;
+    REQUIRE(waitForHits(breakpoints, tick, hitsAfterSpawns + 50));
+
+    breakpoints.detachDebugger();
+    CHECK(readByte(fixture.session, tick) == original);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(fixture.helper.get() == needleValue);
+    CHECK(fixture.helper.ticks() > 0);
+}
+
 TEST_CASE("Detaching restores every original byte", "[breakpoint][integration]") {
     AttachedHelper fixture;
     services::BreakpointService breakpoints(fixture.session);

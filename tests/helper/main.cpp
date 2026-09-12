@@ -13,6 +13,8 @@
 //   in   GET          read the current value   -> out  VAL <int>
 //   in   TICKS        read the tick counter    -> out  TICKCOUNT <n>
 //   in   TIME         read the two clocks      -> out  TIMEVAL <ms> <qpc>
+//   in   SPAWN        start a short-lived thread that calls tick() a
+//                     thousand times and exits  -> out  SPAWNED
 //   in   QUIT         exit cleanly
 
 #include <Windows.h>
@@ -45,6 +47,16 @@ volatile LONG g_running = 1;
 // instruction for a breakpoint to replace.
 __declspec(noinline) void tick() {
     g_ticks += 1;
+}
+
+// A thread that lives just long enough to hit a breakpoint on tick() a few
+// hundred times and then exits, so a test can make a thread die between an
+// int3 hit and its single step.
+static DWORD WINAPI shortLived(LPVOID) {
+    for (int i = 0; i < 1000; ++i) {
+        tick();
+    }
+    return 0;
 }
 
 static DWORD WINAPI worker(LPVOID) {
@@ -99,6 +111,12 @@ int main() {
             QueryPerformanceCounter(&counter);
             std::printf("TIMEVAL %llu %lld\n", GetTickCount64(),
                         static_cast<long long>(counter.QuadPart));
+        } else if (std::strncmp(line, "SPAWN", 5) == 0) {
+            HANDLE spawned = CreateThread(nullptr, 0, shortLived, nullptr, 0, nullptr);
+            if (spawned != nullptr) {
+                CloseHandle(spawned);
+            }
+            std::printf("SPAWNED\n");
         } else if (std::strncmp(line, "QUIT", 4) == 0) {
             break;
         } else {

@@ -137,6 +137,15 @@ public:
         return readLine().rfind("OK ", 0) == 0;
     }
 
+    // Starts a thread in the helper that calls tick() a thousand times and
+    // exits. Blocks until the helper acknowledges the thread was created.
+    bool spawn() {
+        if (!send("SPAWN")) {
+            return false;
+        }
+        return readLine().rfind("SPAWNED", 0) == 0;
+    }
+
     std::int32_t get() {
         if (!send("GET")) {
             return 0;
