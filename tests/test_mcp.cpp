@@ -130,6 +130,24 @@ TEST_CASE("A non-numeric Content-Length is rejected", "[mcp][http]") {
     CHECK(parsed.state == mcp::HttpParse::State::Malformed);
 }
 
+TEST_CASE("A body over the limit is refused with 413, not 400", "[mcp][http]") {
+    const auto parsed = mcp::parseHttpRequest("POST / HTTP/1.1\r\nContent-Length: 5000000\r\n\r\n");
+    REQUIRE(parsed.state == mcp::HttpParse::State::Malformed);
+    CHECK(parsed.status == 413);
+    // An ordinary parse failure keeps the plain 400.
+    CHECK(mcp::parseHttpRequest("POST / HTTP/1.1\r\nContent-Length: abc\r\n\r\n").status == 400);
+}
+
+TEST_CASE("A chunked body is refused rather than read as empty", "[mcp][http]") {
+    // Before this the request parsed as Complete with an empty body, and the
+    // client got a JSON parse error for JSON it never had a chance to send.
+    const auto parsed = mcp::parseHttpRequest(
+        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n");
+    REQUIRE(parsed.state == mcp::HttpParse::State::Malformed);
+    CHECK(parsed.status == 411);
+    CHECK(parsed.error.find("Content-Length") != std::string::npos);
+}
+
 TEST_CASE("A request with no Content-Length parses with an empty body", "[mcp][http]") {
     const auto parsed = mcp::parseHttpRequest("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
     REQUIRE(parsed.state == mcp::HttpParse::State::Complete);
@@ -706,6 +724,23 @@ TEST_CASE("A notification over the socket is accepted with no body", "[mcp][serv
     REQUIRE_FALSE(response.empty());
     CHECK(response.find("HTTP/1.1 202") == 0);
     CHECK(bodyOf(response).empty());
+
+    server.stop();
+}
+
+TEST_CASE("An oversized body is answered with 413 over the socket", "[mcp][server]") {
+    services::RuntimeServices services;
+    mcp::McpServer server(services);
+    if (auto started = server.start(0); !started) {
+        SKIP("This environment does not allow a loopback listener: " + started.error());
+    }
+
+    // Only the headers are sent: the server refuses on the declared length
+    // before it would ever read a body this size.
+    const auto response = sendRaw(server.port(), "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+                                                     server.token() + "\r\nContent-Length: 5000000\r\n\r\n");
+    REQUIRE_FALSE(response.empty());
+    CHECK(response.find("HTTP/1.1 413") == 0);
 
     server.stop();
 }

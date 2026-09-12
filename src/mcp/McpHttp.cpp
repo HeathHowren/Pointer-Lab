@@ -36,7 +36,9 @@ const char* statusText(int status) {
     case 401: return "Unauthorized";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
+    case 411: return "Length Required";
     case 413: return "Payload Too Large";
+    case 431: return "Request Header Fields Too Large";
     case 500: return "Internal Server Error";
     default: return "OK";
     }
@@ -59,6 +61,7 @@ HttpParse parseHttpRequest(const std::string& buffer) {
         // socket loop so the limit is visible next to the parsing it protects.
         if (buffer.size() > 64 * 1024) {
             parse.state = HttpParse::State::Malformed;
+            parse.status = 431;
             parse.error = "The request headers are too large.";
         }
         return parse;
@@ -125,7 +128,19 @@ HttpParse parseHttpRequest(const std::string& buffer) {
     // than this is not one of ours.
     if (length > 4 * 1024 * 1024) {
         parse.state = HttpParse::State::Malformed;
+        parse.status = 413;
         parse.error = "The request body is too large.";
+        return parse;
+    }
+
+    // A chunked body has no Content-Length, and this parser does not decode
+    // chunks. Silently treating it as empty answered a JSON parse error to a
+    // client that had sent perfectly good JSON; saying so is more useful.
+    if (const auto encoding = lower(parse.request.header("transfer-encoding"));
+        encoding.find("chunked") != std::string::npos) {
+        parse.state = HttpParse::State::Malformed;
+        parse.status = 411;
+        parse.error = "Transfer-Encoding: chunked is not supported; send a Content-Length.";
         return parse;
     }
 

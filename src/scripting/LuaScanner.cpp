@@ -111,6 +111,13 @@ void pushValue(lua_State* state, domain::ValueType type, const std::vector<std::
     case domain::ValueType::Bytes:
         lua_pushstring(state, domain::bytesToHex(bytes).c_str());
         break;
+    case domain::ValueType::StringAscii:
+    case domain::ValueType::StringUtf16:
+        // The scanner steps through memory in fixed-width values, so a string
+        // type only ever arrives here as the raw window; the decoded text is
+        // the same thing the UI shows for it.
+        lua_pushstring(state, domain::formatValue(type, bytes).c_str());
+        break;
     }
 }
 

@@ -53,6 +53,7 @@ private:
     static int l_attach(lua_State* state);
     static int l_detach(lua_State* state);
     static int l_modules(lua_State* state);
+    static int l_refresh(lua_State* state);
     static int l_regions(lua_State* state);
     static int l_read(lua_State* state);
     static int l_write(lua_State* state);

@@ -56,6 +56,13 @@ the panel, for someone who runs Pointer Lab in order to hand it to an agent. The
 port defaults to 8722; `0` lets Windows choose a free one. The flag saves a
 click, not the decision — the token still has to be read off the panel.
 
+The transport is one `POST` per call with a `Content-Length`, and the server
+answers with a status code that says what went wrong before the JSON-RPC layer
+is reached: `401` without the token, `405` for a verb other than `POST`, `411`
+for a chunked body (send a `Content-Length` instead), `413` for a body over
+4 MB, `431` for a header block over 64 KB, and `400` for anything else it could
+not parse.
+
 ## Conventions
 
 **Addresses** can be given as a number or as any expression the address boxes in

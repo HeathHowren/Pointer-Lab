@@ -15,15 +15,16 @@ predicate API. None of the functions below relate to it.
 ## Conventions
 
 **Value type names**, case-insensitive: `i8`, `u8`, `i16`, `u16`, `i32`, `u32`,
-`i64`, `u64`, `f32`, `f64`, `bytes`. Anything else is rejected with an error.
+`i64`, `u64`, `f32`, `f64`, `bytes`, `str`, `wstr`. The same names the MCP API
+uses. Any other name raises an error.
 
 **Addresses** are Lua integers in both directions.
 
-**Returned values** are Lua integers, with three exceptions. `f32` and `f64`
+**Returned values** are Lua integers, with four exceptions. `f32` and `f64`
 come back as Lua *numbers*, as you would expect. `u64` also comes back as a
 number rather than an integer, because a full-range unsigned 64-bit value would
 wrap negative in a signed Lua integer. `bytes` comes back as an uppercase hex
-string.
+string. `str` and `wstr` come back as Lua strings, cut at the first terminator.
 
 **Errors** arrive one of three ways, noted per function:
 
@@ -73,9 +74,17 @@ and region lists.
 Array of `{ name = string, base = integer, size = integer }`. Full paths are not
 exposed.
 
-This reads the snapshot taken when you attached, refreshed only by the UI's
-Refresh actions — so it is empty when nothing is attached, and will not show a
-module the target loaded after you attached.
+This reads a snapshot, taken when you attached and refreshed by `refresh()`,
+by `loadlibrary()`, and by the UI's Refresh actions — so it is empty when
+nothing is attached, and will not show a module the target loaded after you
+attached until something refreshes it.
+
+### `refresh()` → boolean [, string]
+
+Re-reads the target's module and region lists. Returns `true`, or
+`false, message` when nothing is attached. Call it before `modules()` or
+`regions()` if the target may have loaded or unloaded something since you
+attached.
 
 ### `regions()` → table
 
@@ -84,7 +93,7 @@ three booleans. Same snapshot caveat as `modules()`.
 
 ## Memory
 
-### `read(address, type = "i32")` → value | nil, string
+### `read(address, type = "i32" [, length])` → value | nil, string
 
 Reads and decodes one value. Returns the value, or `nil, message` where the
 message is either the OS error or `"Short read."` when the read succeeded but
@@ -93,6 +102,12 @@ returned fewer bytes than the type needs.
 Raises on an unrecognised type name. With `type = "bytes"` this reads exactly
 one byte; use `read_bytes` for anything longer.
 
+With `type = "str"` or `"wstr"` the third argument is how many **bytes** to
+look at, default 256 and at most 4096; the result is cut at the first
+terminator inside that window, and a window that runs off the end of mapped
+memory returns what could be read rather than failing. Raises if `length` is
+outside 1–4096.
+
 ### `write(address, type, value)` → boolean [, string]
 
 Writes one value. All three arguments are required — unlike `read`, `type` has
@@ -100,7 +115,9 @@ no default. Returns `true`, or `false, message`.
 
 Raises on an unrecognised type name, or if `value` is not convertible: an
 integer for the `i*`/`u*` types, a number for `f32`/`f64`, a hex string for
-`bytes`.
+`bytes`, a string for `str` (written as bytes, no terminator) and `wstr`
+(written as UTF-16, no terminator). Append `"\0"` yourself if the target
+expects a terminated string and the old one was longer.
 
 ### `read_u32(address)` → integer | nil
 

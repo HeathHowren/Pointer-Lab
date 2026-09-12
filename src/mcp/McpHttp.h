@@ -41,6 +41,11 @@ struct HttpParse {
     State state{State::Incomplete};
     HttpRequest request;
     std::string error;
+    // The status a Malformed request should be answered with. Most are a
+    // plain 400; a body over the limit is 413, an oversized header block 431,
+    // and a chunked body 411, so a client can tell "you sent garbage" from
+    // "you sent too much" without reading the message.
+    int status{400};
     // How many bytes of the buffer this request consumed, so a connection that
     // pipelined a second request does not lose it.
     std::size_t consumed{};

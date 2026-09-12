@@ -72,6 +72,28 @@ void pushTyped(lua_State* state, domain::ValueType type, const std::vector<std::
     case domain::ValueType::Float:  lua_pushnumber(state, unpack<float>(bytes)); break;
     case domain::ValueType::Double: lua_pushnumber(state, unpack<double>(bytes)); break;
     case domain::ValueType::Bytes:  lua_pushstring(state, domain::bytesToHex(bytes).c_str()); break;
+    case domain::ValueType::StringAscii: {
+        // Up to the first NUL: the read was a fixed window, and what follows
+        // the terminator is whatever happened to be next in memory.
+        auto text = bytes;
+        if (const auto nul = std::find(text.begin(), text.end(), std::uint8_t{0}); nul != text.end()) {
+            text.erase(nul, text.end());
+        }
+        lua_pushstring(state, domain::formatValue(type, text).c_str());
+        break;
+    }
+    case domain::ValueType::StringUtf16: {
+        auto text = bytes;
+        text.resize(text.size() & ~std::size_t{1});
+        for (std::size_t i = 0; i + 1 < text.size(); i += 2) {
+            if (text[i] == 0 && text[i + 1] == 0) {
+                text.resize(i);
+                break;
+            }
+        }
+        lua_pushstring(state, domain::formatValue(type, text).c_str());
+        break;
+    }
     }
 }
 
@@ -91,6 +113,17 @@ std::vector<std::uint8_t> packTyped(lua_State* state, int index, domain::ValueTy
     case domain::ValueType::Float:  return pack(static_cast<float>(luaL_checknumber(state, index)));
     case domain::ValueType::Double: return pack(static_cast<double>(luaL_checknumber(state, index)));
     case domain::ValueType::Bytes:  return domain::parseHexBytes(luaL_checkstring(state, index));
+    case domain::ValueType::StringAscii:
+    case domain::ValueType::StringUtf16: {
+        // No terminator is written, matching the scanner's own encoding and
+        // the MCP write tool. Append "\0" in the script to write one.
+        const char* text = luaL_checkstring(state, index);
+        auto parsed = domain::parseScanValue(type, text);
+        if (!parsed) {
+            luaL_error(state, "'%s' is not a valid %s value.", text, domain::valueTypeName(type));
+        }
+        return std::move(parsed->bytes);
+    }
     }
     return {};
 }
@@ -246,6 +279,7 @@ void LuaConsole::registerApi() {
     pushFunction(state_, this, "attach", &LuaConsole::l_attach);
     pushFunction(state_, this, "detach", &LuaConsole::l_detach);
     pushFunction(state_, this, "modules", &LuaConsole::l_modules);
+    pushFunction(state_, this, "refresh", &LuaConsole::l_refresh);
     pushFunction(state_, this, "regions", &LuaConsole::l_regions);
     pushFunction(state_, this, "read", &LuaConsole::l_read);
     pushFunction(state_, this, "write", &LuaConsole::l_write);
@@ -344,6 +378,18 @@ int LuaConsole::l_detach(lua_State* state) {
     return 0;
 }
 
+int LuaConsole::l_refresh(lua_State* state) {
+    auto* console = self(state);
+    if (!console->services_.session().attached()) {
+        lua_pushboolean(state, false);
+        lua_pushstring(state, "No process is attached.");
+        return 2;
+    }
+    console->services_.session().refresh();
+    lua_pushboolean(state, true);
+    return 1;
+}
+
 int LuaConsole::l_modules(lua_State* state) {
     auto* console = self(state);
     const auto modules = console->services_.session().modules();
@@ -392,10 +438,23 @@ int LuaConsole::l_read(lua_State* state) {
     if (!type) {
         return luaL_error(state, "Unknown value type '%s'.", typeText);
     }
-    const auto size = std::max<std::size_t>(1, domain::valueTypeSize(*type));
+    // A string has no width of its own, so the caller says how far to look
+    // (up to the first terminator within that window). Same cap as read_bytes.
+    std::size_t size = std::max<std::size_t>(1, domain::valueTypeSize(*type));
+    const bool string = domain::isStringType(*type);
+    if (string) {
+        const lua_Integer requested = luaL_optinteger(state, 3, 256);
+        if (requested < 1 || requested > maxReadBytes) {
+            return luaL_error(state, "read length must be between 1 and %d, not %d.", static_cast<int>(maxReadBytes),
+                              static_cast<int>(requested));
+        }
+        size = static_cast<std::size_t>(requested);
+    }
 
     auto bytes = console->services_.session().readBytes(address, size);
-    if (!bytes || bytes.value().size() != size) {
+    // A string window may run past the end of what is mapped; whatever was
+    // readable is still a string. A fixed-width value has to arrive whole.
+    if (!bytes || bytes.value().empty() || (!string && bytes.value().size() != size)) {
         lua_pushnil(state);
         lua_pushstring(state, bytes ? "Short read." : bytes.error().c_str());
         return 2;

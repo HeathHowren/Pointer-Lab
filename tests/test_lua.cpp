@@ -399,6 +399,52 @@ TEST_CASE("A script can list modules and resolve a pointer chain", "[lua][integr
     CHECK(anyContains(output, "resolve\tnil\ttrue"));
 }
 
+// Regression: the typed read/write switches had no case for the two string
+// types. read(addr, "str") returned whatever was on top of the Lua stack and
+// write(addr, "str", "hp") wrote nothing and reported success.
+TEST_CASE("String reads and writes work against a live target", "[lua][integration]") {
+    HelperProcess helper;
+    REQUIRE(helper.ready());
+    Console fixture;
+
+    const auto scratch = std::to_string(helper.scratch());
+    const auto output = run(fixture.console,
+                            "assert(attach(" + std::to_string(helper.pid()) + "))\n"
+                            "assert(write(" + scratch + ", 'bytes', '00 00 00 00 00 00 00 00 00 00 00 00'))\n"
+                            "assert(write(" + scratch + ", 'str', 'hp'))\n"
+                            "print(read(" + scratch + ", 'str'))\n"
+                            "print(read(" + scratch + ", 'str', 1))\n"
+                            "print(read_bytes(" + scratch + ", 3))\n"
+                            "assert(write(" + scratch + ", 'wstr', 'mana'))\n"
+                            "print(read(" + scratch + ", 'wstr'))\n"
+                            "print(read_bytes(" + scratch + ", 4))\n"
+                            "print(pcall(read, " + scratch + ", 'str', 0))\n");
+
+    REQUIRE(output.size() == 6);
+    CHECK(output[0] == "hp");
+    CHECK(output[1] == "h");
+    // No terminator is written: the byte after "hp" is still the zero we put
+    // there, not one the write added.
+    CHECK(output[2] == "68 70 00");
+    CHECK(output[3] == "mana");
+    CHECK(output[4] == "6D 00 61 00");
+    CHECK(anyContains({output[5]}, "between 1 and 4096"));
+}
+
+TEST_CASE("refresh re-reads the module list", "[lua][integration]") {
+    HelperProcess helper;
+    REQUIRE(helper.ready());
+    Console fixture;
+
+    const auto output = run(fixture.console,
+                            "print(refresh())\n"
+                            "assert(attach(" + std::to_string(helper.pid()) + "))\n"
+                            "print(refresh(), #modules() > 0)\n");
+    REQUIRE(output.size() == 2);
+    CHECK(anyContains({output[0]}, "false"));
+    CHECK(output[1] == "true\ttrue");
+}
+
 TEST_CASE("Unknown types and scan modes are rejected clearly", "[lua]") {
     Console fixture;
     const auto output = run(fixture.console,

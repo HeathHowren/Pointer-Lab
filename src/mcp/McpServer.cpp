@@ -234,7 +234,7 @@ void McpServer::handleConnection(std::uintptr_t clientHandle) {
     }
 
     if (parse.state == HttpParse::State::Malformed) {
-        reply(httpResponse(400, Json{{"error", parse.error}}.dump()));
+        reply(httpResponse(parse.status, Json{{"error", parse.error}}.dump()));
         closesocket(client);
         return;
     }

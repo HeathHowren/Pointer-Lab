@@ -142,7 +142,10 @@ configure_file(
 
 add_library(pointerlab_warnings INTERFACE)
 if(MSVC)
-    target_compile_options(pointerlab_warnings INTERFACE /W4 /permissive- /Zc:__cplusplus)
+    # /w44062: a switch over an enum that has no default and misses an
+    # enumerator is an error, not a silent fall-through. The Lua read()/write()
+    # switches omitted the string types for a whole release without a peep.
+    target_compile_options(pointerlab_warnings INTERFACE /W4 /w44062 /permissive- /Zc:__cplusplus)
     if(POINTERLAB_WARNINGS_AS_ERRORS)
         target_compile_options(pointerlab_warnings INTERFACE /WX)
     endif()

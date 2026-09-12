@@ -123,6 +123,29 @@ tool name.
   the data page executable. Pages are now escalated and restored one at a
   time.
 
+- **Lua `read` and `write` did not handle `str` and `wstr`.** The type names
+  parsed, but the typed switches had no case for them: `read(addr, "str")`
+  returned whatever was on top of the Lua stack and `write(addr, "str", "hp")`
+  wrote nothing and reported success. Both work now; `read` takes an optional
+  byte count for the string types and cuts the result at the first
+  terminator. The Lua Scanner's `ctx.value` had the same gap. The build now
+  treats an unhandled enumerator in a switch as an error, which is how the
+  scanner's copy was found.
+
+- **The MCP server answered 400 to a request that was merely too large, and
+  read a chunked body as empty.** A body over the 4 MB limit is now refused
+  with 413 and an oversized header block with 431, and a request that uses
+  `Transfer-Encoding: chunked` gets 411 with a message saying to send a
+  Content-Length instead of a JSON parse error for JSON it never had a chance
+  to send.
+
+### Added
+
+- **Lua `refresh()`**, the same re-read of the module and region lists the
+  MCP `refresh` tool does. The `modules()` documentation said the list was
+  only refreshed by the UI and contradicted `loadlibrary`'s; both are now
+  accurate.
+
 ## [3.1.1] — 2026-08-31
 
 No behaviour changes. This exists so the MCP reference that ships beside the
