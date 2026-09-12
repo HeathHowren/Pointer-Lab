@@ -250,10 +250,50 @@ infra::Result<void> Win32Platform::writeMemory(HANDLE process, std::uintptr_t ad
     }
 
     // Escalate: make the range writable, write, then put the protection back.
-    DWORD oldProtection{};
-    if (!VirtualProtectEx(process, target, size, PAGE_EXECUTE_READWRITE, &oldProtection)) {
-        const DWORD error = GetLastError();
-        return infra::Result<void>::fail("Could not make the target memory writable: " + formatLastError(error), error);
+    //
+    // One page at a time. VirtualProtectEx over a range that spans pages with
+    // different protections reports only the *first* page's old protection,
+    // so restoring the whole range from that stamped page one's protection
+    // onto every page -- a write that started in .text and ran into .rdata
+    // left the second page executable.
+    SYSTEM_INFO info{};
+    GetSystemInfo(&info);
+    const auto pageSize = static_cast<std::uintptr_t>(info.dwPageSize);
+    const auto firstPage = address & ~(pageSize - 1);
+    const auto lastPage = (address + size - 1) & ~(pageSize - 1);
+
+    struct Page {
+        std::uintptr_t base{};
+        DWORD oldProtection{};
+    };
+    std::vector<Page> pages;
+    pages.reserve(static_cast<std::size_t>((lastPage - firstPage) / pageSize + 1));
+
+    const auto restore = [&]() {
+        // In reverse, and every one of them even if an earlier restore failed.
+        for (auto page = pages.rbegin(); page != pages.rend(); ++page) {
+            DWORD restored{};
+            if (!VirtualProtectEx(process, reinterpret_cast<LPVOID>(page->base), pageSize, page->oldProtection,
+                                  &restored)) {
+                infra::Logger::instance().warn("Could not restore memory protection at " + domain::toHex(page->base) +
+                                               ".");
+            }
+        }
+    };
+
+    for (auto page = firstPage;; page += pageSize) {
+        DWORD oldProtection{};
+        if (!VirtualProtectEx(process, reinterpret_cast<LPVOID>(page), pageSize, PAGE_EXECUTE_READWRITE,
+                              &oldProtection)) {
+            const DWORD error = GetLastError();
+            restore();
+            return infra::Result<void>::fail("Could not make the target memory writable: " + formatLastError(error),
+                                             error);
+        }
+        pages.push_back({page, oldProtection});
+        if (page == lastPage) {
+            break;
+        }
     }
 
     written = 0;
@@ -262,10 +302,7 @@ infra::Result<void> Win32Platform::writeMemory(HANDLE process, std::uintptr_t ad
     FlushInstructionCache(process, target, size);
 
     // Always restore, even when the write failed.
-    DWORD restored{};
-    if (!VirtualProtectEx(process, target, size, oldProtection, &restored)) {
-        infra::Logger::instance().warn("Could not restore memory protection at " + domain::toHex(address) + ".");
-    }
+    restore();
 
     if (!wrote || written != size) {
         return infra::Result<void>::fail(formatLastError(writeError), writeError);

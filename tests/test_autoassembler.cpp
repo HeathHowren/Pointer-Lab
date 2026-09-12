@@ -41,7 +41,8 @@ struct Fixture {
     engine_patch::PatchRegistry patches{attached.session};
     engine_symbols::SymbolTable symbols;
     engine_inject::Injector injector{attached.session};
-    engine_aa::AutoAssembler aa{attached.session, assembler, patches, symbols, injector};
+    engine_disasm::Disassembler disassembler;
+    engine_aa::AutoAssembler aa{attached.session, assembler, patches, symbols, injector, disassembler};
 
     [[nodiscard]] domain::TargetSession& session() { return attached.session; }
     [[nodiscard]] std::uintptr_t markerAddress() const { return attached.helper.root(); }
@@ -169,10 +170,17 @@ TEST_CASE("an injection finds its own address, allocates within reach and jumps 
     const auto patched = fixture.read(inject, marker.size());
     CHECK(patched[0] == 0xE9);
     CHECK(readRel32(patched, 1) == static_cast<std::int32_t>(newmem.value() - (inject + 5)));
-    // Only the five bytes the jmp needs were touched. A patch that rounded up
-    // to the whole pattern would be destroying bytes it had no reason to.
-    CHECK(std::vector<std::uint8_t>(patched.begin() + 5, patched.end()) ==
-          std::vector<std::uint8_t>(marker.begin() + 5, marker.end()));
+    // The patch is padded out to an instruction boundary, and no further. The
+    // marker decodes as a six-byte instruction (DE AD BE EF CA FE is
+    // `fisubr dword ptr [rbp+...]`), so the five-byte jmp gets exactly one nop
+    // after it and the two bytes beyond that are untouched. A patch that
+    // rounded up to the whole pattern would be destroying bytes it had no
+    // reason to; one that stopped at five would leave a torn instruction.
+    CHECK(patched[5] == 0x90);
+    CHECK(std::vector<std::uint8_t>(patched.begin() + 6, patched.end()) ==
+          std::vector<std::uint8_t>(marker.begin() + 6, marker.end()));
+    REQUIRE(fixture.patches.patches().size() == 1);
+    CHECK(fixture.patches.patches().front().size() == 6);
 
     // And the other half of the layout: the jump back is computed from where
     // the cave actually landed, which is not known until after the allocation.
@@ -470,7 +478,8 @@ TEST_CASE("a script cannot run without a target", "[aa]") {
     engine_patch::PatchRegistry patches(session);
     engine_symbols::SymbolTable symbols;
     engine_inject::Injector injector(session);
-    engine_aa::AutoAssembler aa(session, assembler, patches, symbols, injector);
+    engine_disasm::Disassembler disassembler;
+    engine_aa::AutoAssembler aa(session, assembler, patches, symbols, injector, disassembler);
 
     auto checked = aa.check("[ENABLE]\nalloc(store, 0x20)\n", true);
     REQUIRE_FALSE(checked.has_value());

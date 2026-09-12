@@ -11,10 +11,13 @@
 
 #include "HelperProcess.h"
 
+#include "engine_inject/Injector.h"
 #include "engine_patch/PatchRegistry.h"
 
 #include <algorithm>
+#include <atomic>
 #include <numeric>
+#include <thread>
 
 using namespace ire;
 using testsupport::AttachedHelper;
@@ -104,6 +107,92 @@ TEST_CASE("overlapping patches are refused", "[patch][integration]") {
     CHECK(registry.apply(address, ramp(8, 0xC0), "just before").has_value());
     CHECK(registry.apply(address + 16, ramp(8, 0xD0), "just after").has_value());
     CHECK(registry.patches().size() == 3);
+}
+
+// Regression: the overlap check and the record were in separate critical
+// sections with the target write between them, so two callers applying
+// overlapping patches at the same moment could both pass the check. The
+// second then recorded the first's replacement bytes as its "original".
+TEST_CASE("concurrent overlapping patches are refused, not both recorded", "[patch][integration]") {
+    AttachedHelper fixture;
+    engine_patch::PatchRegistry registry(fixture.session);
+    const auto address = fixture.helper.scratch();
+    REQUIRE(fixture.session.writeBytes(address, ramp(16, 0x10)).has_value());
+
+    for (int round = 0; round < 20; ++round) {
+        std::atomic<int> ready{0};
+        std::atomic<bool> go{false};
+        std::atomic<int> succeeded{0};
+        const auto contender = [&](std::uint8_t start) {
+            ++ready;
+            while (!go) {
+            }
+            if (registry.apply(address, ramp(16, start), "contender").has_value()) {
+                ++succeeded;
+            }
+        };
+        std::thread first(contender, 0xA0);
+        std::thread second(contender, 0xC0);
+        while (ready < 2) {
+        }
+        go = true;
+        first.join();
+        second.join();
+
+        INFO("round " << round);
+        REQUIRE(succeeded == 1);
+        const auto patches = registry.patches();
+        REQUIRE(patches.size() == 1);
+        // Whichever won, its original is the true original -- never the other
+        // contender's bytes.
+        CHECK(patches.front().originalBytes == ramp(16, 0x10));
+        REQUIRE(registry.remove(patches.front().id).has_value());
+        CHECK(read(fixture.session, address, 16) == ramp(16, 0x10));
+    }
+}
+
+// Regression: VirtualProtectEx over a range spanning two pages reports only
+// the first page's old protection, and restoring the whole range from it
+// stamped that onto the second page too. A write that crossed from a
+// read-only page into an executable one left the read-only page executable.
+TEST_CASE("a write across two pages restores each page's own protection", "[patch][platform][integration]") {
+    AttachedHelper fixture;
+    engine_inject::Injector injector(fixture.session);
+
+    SYSTEM_INFO info{};
+    GetSystemInfo(&info);
+    const auto pageSize = static_cast<std::uintptr_t>(info.dwPageSize);
+
+    auto block = injector.allocate(static_cast<std::size_t>(pageSize * 2), PAGE_READWRITE);
+    REQUIRE(block.has_value());
+    const auto first = block.value();
+    const auto second = first + pageSize;
+
+    const auto protectionOf = [&](std::uintptr_t page) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        REQUIRE(VirtualQueryEx(fixture.session.processHandle(), reinterpret_cast<LPCVOID>(page), &mbi, sizeof(mbi)) ==
+                sizeof(mbi));
+        return mbi.Protect;
+    };
+
+    DWORD old{};
+    REQUIRE(fixture.session.platform().protectMemory(fixture.session.processHandle(), first, pageSize,
+                                                     PAGE_READONLY, &old).has_value());
+    REQUIRE(fixture.session.platform().protectMemory(fixture.session.processHandle(), second, pageSize,
+                                                     PAGE_EXECUTE_READ, &old).has_value());
+    REQUIRE(protectionOf(first) == PAGE_READONLY);
+    REQUIRE(protectionOf(second) == PAGE_EXECUTE_READ);
+
+    // Straddles the boundary, so the optimistic write fails on both pages and
+    // the escalate-and-restore path runs across them.
+    const auto straddle = second - 8;
+    REQUIRE(fixture.session.writeBytes(straddle, ramp(16, 0x30)).has_value());
+    CHECK(read(fixture.session, straddle, 16) == ramp(16, 0x30));
+
+    CHECK(protectionOf(first) == PAGE_READONLY);
+    CHECK(protectionOf(second) == PAGE_EXECUTE_READ);
+
+    static_cast<void>(injector.free(first));
 }
 
 TEST_CASE("remove restores the original bytes and forgets the patch", "[patch][integration]") {

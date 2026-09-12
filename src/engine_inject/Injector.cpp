@@ -7,37 +7,48 @@ namespace ire::engine_inject {
 
 Injector::Injector(domain::TargetSession& session) : session_(session) {}
 
+// Every operation here takes its own duplicate of the process handle for as
+// long as it runs. The session's handle is closed under the session's lock on
+// detach, and a raw copy of it used after that lock was released -- which is
+// what these did -- could be dead, or worse, reused for something else by
+// the time createRemoteThread had waited its five seconds.
+
 infra::Result<std::uintptr_t> Injector::allocate(std::size_t size, DWORD protection) {
-    if (!session_.attached()) {
-        return infra::Result<std::uintptr_t>::fail("No target process attached.");
+    auto process = session_.duplicateHandle();
+    if (!process) {
+        return infra::Result<std::uintptr_t>::fail(process.error(), process.code());
     }
-    return session_.platform().allocate(session_.processHandle(), size, protection);
+    return session_.platform().allocate(process.value().get(), size, protection);
 }
 
 infra::Result<std::uintptr_t> Injector::allocateNear(std::size_t size, DWORD protection, std::uintptr_t hint) {
-    if (!session_.attached()) {
-        return infra::Result<std::uintptr_t>::fail("No target process attached.");
+    auto process = session_.duplicateHandle();
+    if (!process) {
+        return infra::Result<std::uintptr_t>::fail(process.error(), process.code());
     }
-    return session_.platform().allocateNear(session_.processHandle(), size, protection, hint);
+    return session_.platform().allocateNear(process.value().get(), size, protection, hint);
 }
 
 infra::Result<void> Injector::free(std::uintptr_t address) {
-    if (!session_.attached()) {
-        return infra::Result<void>::fail("No target process attached.");
+    auto process = session_.duplicateHandle();
+    if (!process) {
+        return infra::Result<void>::fail(process.error(), process.code());
     }
-    return session_.platform().free(session_.processHandle(), address);
+    return session_.platform().free(process.value().get(), address);
 }
 
 infra::Result<std::uint32_t> Injector::createThread(std::uintptr_t start, std::uintptr_t parameter) {
-    if (!session_.attached()) {
-        return infra::Result<std::uint32_t>::fail("No target process attached.");
+    auto process = session_.duplicateHandle();
+    if (!process) {
+        return infra::Result<std::uint32_t>::fail(process.error(), process.code());
     }
-    return session_.platform().createRemoteThread(session_.processHandle(), start, parameter);
+    return session_.platform().createRemoteThread(process.value().get(), start, parameter);
 }
 
 infra::Result<std::uint32_t> Injector::loadLibrary(const std::wstring& dllPath) {
-    if (!session_.attached()) {
-        return infra::Result<std::uint32_t>::fail("No target process attached.");
+    auto process = session_.duplicateHandle();
+    if (!process) {
+        return infra::Result<std::uint32_t>::fail(process.error(), process.code());
     }
 
     // Resolve LoadLibraryW out of the target's own kernel32 rather than ours.
@@ -56,7 +67,7 @@ infra::Result<std::uint32_t> Injector::loadLibrary(const std::wstring& dllPath) 
                                        "). Falling back to this process's own address.");
     }
 
-    return session_.platform().injectLoadLibraryW(session_.processHandle(), dllPath, loadLibrary);
+    return session_.platform().injectLoadLibraryW(process.value().get(), dllPath, loadLibrary);
 }
 
 } // namespace ire::engine_inject

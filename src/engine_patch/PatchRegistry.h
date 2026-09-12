@@ -85,12 +85,24 @@ public:
     [[nodiscard]] bool drifted(const Patch& patch) const;
 
 private:
-    // Expects mutex_ to be held.
+    // A range an apply() in progress has claimed but not yet recorded. Holds
+    // the id the patch will get, so nothing else can claim the bytes while the
+    // target is being read and written outside the lock.
+    struct Reservation {
+        std::uint64_t id{};
+        std::uintptr_t address{};
+        std::size_t size{};
+    };
+
+    // Both expect mutex_ to be held. overlapsLocked counts reservations as
+    // taken.
     [[nodiscard]] bool overlapsLocked(std::uintptr_t address, std::size_t size, std::uint64_t ignoreId) const;
+    void releaseLocked(std::uint64_t reservationId);
 
     domain::TargetSession& session_;
     mutable std::mutex mutex_;
     std::vector<Patch> patches_;
+    std::vector<Reservation> reserved_;
     std::uint64_t nextId_{1};
 };
 

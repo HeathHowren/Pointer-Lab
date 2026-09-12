@@ -272,8 +272,9 @@ DefineMap asSubstitutions(const SymbolMap& symbols) {
 
 AutoAssembler::AutoAssembler(domain::TargetSession& session, const engine_asm::Assembler& assembler,
                              engine_patch::PatchRegistry& patches, engine_symbols::SymbolTable& symbols,
-                             engine_inject::Injector& injector)
-    : session_(session), assembler_(assembler), patches_(patches), symbols_(symbols), injector_(injector) {}
+                             engine_inject::Injector& injector, const engine_disasm::Disassembler& disassembler)
+    : session_(session), assembler_(assembler), patches_(patches), symbols_(symbols), injector_(injector),
+      disassembler_(disassembler) {}
 
 infra::Result<CompileResult> AutoAssembler::compile(const std::string& source, bool enableSection, bool execute,
                                                     RunState* state) {
@@ -684,7 +685,13 @@ infra::Result<void> AutoAssembler::runEnable(Script& script, RunState& state) {
             continue;
         }
 
-        auto applied = patches_.apply(block.address, block.bytes, "script: " + script.name);
+        // Over the target's own code, so pad to an instruction boundary with
+        // nops, as the manual patch paths already do. A five-byte jmp written
+        // over a seven-byte instruction otherwise leaves two bytes of it
+        // behind, and the target crashes the first time it returns there --
+        // unless the script author remembered to write the nops by hand.
+        auto bytes = engine_disasm::padToInstructionBoundary(disassembler_, session_, block.address, block.bytes);
+        auto applied = patches_.apply(block.address, std::move(bytes), "script: " + script.name);
         if (!applied) {
             rollback();
             return infra::Result<void>::fail("Could not patch " + domain::toHex(block.address) + ": " +

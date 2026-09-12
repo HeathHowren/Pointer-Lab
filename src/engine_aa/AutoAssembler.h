@@ -2,6 +2,7 @@
 
 #include "domain/TargetSession.h"
 #include "engine_asm/Assembler.h"
+#include "engine_disasm/Disassembler.h"
 #include "engine_inject/Injector.h"
 #include "engine_patch/PatchRegistry.h"
 #include "engine_symbols/SymbolTable.h"
@@ -95,7 +96,7 @@ class AutoAssembler {
 public:
     AutoAssembler(domain::TargetSession& session, const engine_asm::Assembler& assembler,
                   engine_patch::PatchRegistry& patches, engine_symbols::SymbolTable& symbols,
-                  engine_inject::Injector& injector);
+                  engine_inject::Injector& injector, const engine_disasm::Disassembler& disassembler);
 
     // Compiles the named section without writing anything or allocating
     // anything. For the editor's Check button: it reports what the script
@@ -162,6 +163,9 @@ private:
     engine_patch::PatchRegistry& patches_;
     engine_symbols::SymbolTable& symbols_;
     engine_inject::Injector& injector_;
+    // Only used to pad a patch over the target's code out to whole
+    // instructions; see runEnable.
+    const engine_disasm::Disassembler& disassembler_;
 
     mutable std::mutex mutex_;
     std::vector<Script> scripts_;

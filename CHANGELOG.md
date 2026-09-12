@@ -98,6 +98,31 @@ tool name.
   meant the debug registers were programmed on no thread at all and the
   breakpoint never fired.
 
+- **Two patches applied at the same moment could both be recorded over the
+  same bytes.** The overlap check and the record were separate critical
+  sections with the target write between them, so a script, the Patches
+  panel, the console and an MCP call racing each other could all pass the
+  check -- and the loser recorded the winner's replacement bytes as its
+  "original". The range is now reserved under the first lock and released
+  under the second.
+
+- **Injection used a copy of the process handle that Detach could close
+  under it.** `alloc`, `thread` and `loadlibrary` each now take their own
+  duplicate of the handle for as long as they run, so a five-second wait for
+  a remote thread no longer races the user pressing Detach.
+
+- **Auto-assembler scripts did not pad a patch out to an instruction
+  boundary.** A `jmp newmem` written over a seven-byte instruction left two
+  bytes of it behind unless the script spelled out the `nop`s. Scripts now
+  get the same padding the Patches panel and the `patch` tool already apply.
+
+- **A write across two pages with different protections left the wrong
+  protection on the second page.** `VirtualProtectEx` over such a range
+  reports only the first page's old protection, and restoring the range from
+  it stamped that onto both pages -- a write from `.text` into `.rdata` left
+  the data page executable. Pages are now escalated and restored one at a
+  time.
+
 ## [3.1.1] — 2026-08-31
 
 No behaviour changes. This exists so the MCP reference that ships beside the

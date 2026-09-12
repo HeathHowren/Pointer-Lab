@@ -119,6 +119,22 @@ HANDLE TargetSession::processHandle() const {
     return process_.get();
 }
 
+infra::Result<platform_win32::UniqueHandle> TargetSession::duplicateHandle() const {
+    using Handle = infra::Result<platform_win32::UniqueHandle>;
+    std::scoped_lock lock(mutex_);
+    if (!process_) {
+        return Handle::fail("No target process attached.");
+    }
+    HANDLE duplicate = nullptr;
+    if (!DuplicateHandle(GetCurrentProcess(), process_.get(), GetCurrentProcess(), &duplicate, 0, FALSE,
+                         DUPLICATE_SAME_ACCESS)) {
+        const DWORD error = GetLastError();
+        return Handle::fail("Could not duplicate the process handle: " + platform_win32::Win32Platform::formatLastError(error),
+                            error);
+    }
+    return Handle::ok(platform_win32::UniqueHandle(duplicate));
+}
+
 Bitness TargetSession::bitness() const {
     std::scoped_lock lock(mutex_);
     return bitness_;

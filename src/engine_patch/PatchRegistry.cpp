@@ -16,9 +16,17 @@ PatchRegistry::PatchRegistry(domain::TargetSession& session) : session_(session)
 
 bool PatchRegistry::overlapsLocked(std::uintptr_t address, std::size_t size, std::uint64_t ignoreId) const {
     const auto end = address + size;
-    return std::any_of(patches_.begin(), patches_.end(), [&](const Patch& patch) {
+    const bool recorded = std::any_of(patches_.begin(), patches_.end(), [&](const Patch& patch) {
         return patch.id != ignoreId && address < patch.end() && patch.address < end;
     });
+    const bool reserved = std::any_of(reserved_.begin(), reserved_.end(), [&](const Reservation& range) {
+        return address < range.address + range.size && range.address < end;
+    });
+    return recorded || reserved;
+}
+
+void PatchRegistry::releaseLocked(std::uint64_t reservationId) {
+    std::erase_if(reserved_, [reservationId](const Reservation& range) { return range.id == reservationId; });
 }
 
 Id PatchRegistry::apply(std::uintptr_t address, std::vector<std::uint8_t> bytes, std::string description,
@@ -30,6 +38,14 @@ Id PatchRegistry::apply(std::uintptr_t address, std::vector<std::uint8_t> bytes,
         return Id::fail("No target process is attached.");
     }
 
+    // The overlap check and the record are in different critical sections
+    // with the target write between them, so two callers applying overlapping
+    // patches at once could both pass the check -- and the second would then
+    // capture the first's replacement bytes as its "original", the very thing
+    // the check exists to prevent. The range is reserved under the first lock
+    // and released under the second (or on any failure in between), so a
+    // concurrent apply sees it as taken.
+    std::uint64_t reservationId{};
     {
         std::scoped_lock lock(mutex_);
         if (overlapsLocked(address, bytes.size(), 0)) {
@@ -38,7 +54,22 @@ Id PatchRegistry::apply(std::uintptr_t address, std::vector<std::uint8_t> bytes,
                             "replacement, and disabling them in the wrong order would leave code that never "
                             "existed.");
         }
+        reservationId = nextId_++;
+        reserved_.push_back({reservationId, address, bytes.size()});
     }
+    // Every return below this point releases the reservation; the success path
+    // does so under the same lock that records the patch.
+    struct Release {
+        PatchRegistry& registry;
+        std::uint64_t id;
+        bool armed{true};
+        ~Release() {
+            if (armed) {
+                std::scoped_lock lock(registry.mutex_);
+                registry.releaseLocked(id);
+            }
+        }
+    } release{*this, reservationId};
 
     // Read the originals *before* writing, and require the full length. A short
     // read here would record a truncated original, and disabling the patch
@@ -59,8 +90,10 @@ Id PatchRegistry::apply(std::uintptr_t address, std::vector<std::uint8_t> bytes,
     }
 
     std::scoped_lock lock(mutex_);
+    release.armed = false;
+    releaseLocked(reservationId);
     Patch patch;
-    patch.id = nextId_++;
+    patch.id = reservationId;
     patch.address = address;
     patch.originalBytes = std::move(original.value());
     patch.patchedBytes = std::move(bytes);

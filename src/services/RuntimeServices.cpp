@@ -275,7 +275,7 @@ RuntimeServices::RuntimeServices()
       injector_(session_),
       accessWatch_(session_, disassembler_),
       patches_(session_),
-      autoAssembler_(session_, assembler_, patches_, symbols_, injector_),
+      autoAssembler_(session_, assembler_, patches_, symbols_, injector_, disassembler_),
       dissector_(session_, symbols_),
       speed_(session_, injector_),
       breakpoints_(session_, &accessWatch_) {}

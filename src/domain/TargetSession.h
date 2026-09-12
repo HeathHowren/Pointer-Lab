@@ -24,7 +24,15 @@ public:
     [[nodiscard]] bool readOnly() const;
     [[nodiscard]] std::uint32_t pid() const;
     [[nodiscard]] std::wstring processName() const;
+    // The raw handle. Only valid while the caller can rule out a concurrent
+    // detach(): the session closes it under its own lock, and a copy taken
+    // out of that lock can be dead or recycled by the time it is used. For
+    // anything that outlives a single locked call, use duplicateHandle().
     [[nodiscard]] HANDLE processHandle() const;
+    // A handle of the caller's own to the same process. It stays valid across
+    // detach(), so an injection that waits seconds for a remote thread does
+    // not race the user pressing Detach.
+    [[nodiscard]] infra::Result<platform_win32::UniqueHandle> duplicateHandle() const;
 
     // Pointer width of the attached target, determined once at attach. Returns
     // X64 when nothing is attached, which is the harmless default: every engine
