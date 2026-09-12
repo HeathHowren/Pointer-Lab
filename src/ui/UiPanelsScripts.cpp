@@ -27,7 +27,12 @@ void UiApp::newScriptFromAddress(std::uintptr_t address, const std::vector<std::
 }
 
 void UiApp::renderScriptsPanel() {
-    ImGui::Begin("Scripts", &showScripts_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Scripts", &showScripts_)) {
+        ImGui::End();
+        return;
+    }
 
     auto& assembler = services_.autoAssembler();
     const auto scripts = assembler.scripts();

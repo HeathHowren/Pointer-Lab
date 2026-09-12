@@ -17,7 +17,12 @@ void UiApp::gotoMemory(std::uintptr_t address) {
 }
 
 void UiApp::renderMemoryPanel() {
-    ImGui::Begin("Memory Viewer", &showMemoryViewer_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Memory Viewer", &showMemoryViewer_)) {
+        ImGui::End();
+        return;
+    }
 
     constexpr std::size_t bytesPerRow = 16;
 
@@ -314,7 +319,12 @@ void UiApp::renderMemoryPanel() {
     ImGui::End();
 }
 void UiApp::renderDisassemblyPanel() {
-    ImGui::Begin("Disassembly", &showDisassembly_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Disassembly", &showDisassembly_)) {
+        ImGui::End();
+        return;
+    }
     ImGui::SetNextItemWidth(scaled(220.0f));
     ImGui::InputTextWithHint("Address", "0x7FF... or client.dll+0x4A2C10", disasmAddress_.data(), disasmAddress_.size());
     // Cached: this runs every frame, and an address box naming an export walks
@@ -435,7 +445,12 @@ void UiApp::renderDisassemblyPanel() {
     ImGui::End();
 }
 void UiApp::renderBreakpointPanel() {
-    ImGui::Begin("Breakpoints", &showBreakpoints_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Breakpoints", &showBreakpoints_)) {
+        ImGui::End();
+        return;
+    }
     statusPill(services_.breakpoints().debuggerAttached() ? "DEBUGGER ATTACHED" : "DEBUGGER OFF",
         services_.breakpoints().debuggerAttached() ? colorFromBytes(30, 111, 96) : colorFromBytes(63, 75, 88));
     ImGui::SameLine();

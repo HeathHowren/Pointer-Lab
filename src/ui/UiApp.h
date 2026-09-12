@@ -5,6 +5,8 @@
 #include "services/RuntimeServices.h"
 #include "services/UiCommands.h"
 #include "storage/ProjectStore.h"
+#include "engine_struct/Dissector.h"
+#include "infra/Logger.h"
 #include <Windows.h>
 #include <d3d11.h>
 #include <imgui.h>
@@ -20,6 +22,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -132,6 +135,22 @@ private:
     // Registers exactly the F-keys currently assigned to an address list entry,
     // so Pointer Lab claims no key it is not actually using.
     void syncGlobalHotkeys();
+    // True while something is going on that changes what the window shows
+    // without any input: a job, a script, a debugger, an agent on the MCP
+    // socket, a toast counting down. The frame loop only idles when this is
+    // false and the window is in the background.
+    [[nodiscard]] bool busy();
+
+    // The target's module and region tables, copied once per session
+    // generation rather than once per panel per frame. Names and paths are
+    // narrowed alongside, since every consumer wanted them narrow.
+    void refreshTargetCache();
+    [[nodiscard]] const std::vector<domain::ModuleInfo>& cachedModules();
+    [[nodiscard]] const std::vector<domain::MemoryRegion>& cachedRegions();
+    // The address list, copied when its revision changes.
+    [[nodiscard]] const std::vector<domain::AddressEntry>& cachedAddressEntries();
+    // The structure definitions, copied when the dissector's revision changes.
+    [[nodiscard]] const std::vector<domain::Structure>& cachedStructures();
 
     // Failures used to reach the user only through the Logs panel, which is
     // hidden by default, so a failed patch looked exactly like a successful
@@ -249,6 +268,9 @@ private:
     bool imguiInitialized_{};
     bool classRegistered_{};
     bool minimized_{};
+    // Whether this application is the foreground one. In the background with
+    // nothing running the frame loop waits for input rather than rendering.
+    bool focused_{true};
 
     services::RuntimeServices services_;
     platform_win32::GlobalHotkeys hotkeys_;
@@ -425,8 +447,37 @@ private:
     // Backing store for resolveAddressCached. Keyed by the text; dropped
     // wholesale when the target's module table changes, which is the only
     // thing that can change what an expression resolves to.
-    std::map<std::string, std::optional<std::uintptr_t>> resolveCache_;
+    std::map<std::string, std::optional<std::uintptr_t>, std::less<>> resolveCache_;
     std::uint64_t resolveCacheGeneration_{};
+
+    // Backing stores for the cached* accessors above. Each counter starts at a
+    // value the source never takes, so the first call fills the cache.
+    std::vector<domain::ModuleInfo> cachedModules_;
+    std::vector<std::string> cachedModuleNames_;
+    std::vector<std::string> cachedModulePaths_;
+    std::vector<domain::MemoryRegion> cachedRegions_;
+    std::uint64_t targetCacheGeneration_{static_cast<std::uint64_t>(-1)};
+    std::vector<domain::AddressEntry> cachedAddressEntries_;
+    std::uint64_t addressCacheRevision_{static_cast<std::uint64_t>(-1)};
+    std::vector<domain::Structure> cachedStructures_;
+    std::uint64_t structureCacheRevision_{static_cast<std::uint64_t>(-1)};
+
+    // The last structure read and what it was read for. Re-read ten times a
+    // second, or at once when any of its inputs change.
+    std::optional<infra::Result<engine_struct::Snapshot>> structureSnapshot_;
+    std::uint64_t structureReadId_{};
+    std::vector<std::uintptr_t> structureReadAddresses_;
+    std::uint64_t structureReadGeneration_{};
+    std::uint64_t structureReadRevision_{};
+    std::chrono::steady_clock::time_point lastStructureRead_{};
+
+    // The log panel's view: the records and the indices of those that match
+    // the filter, rebuilt only when the logger's revision or the filter text
+    // changes rather than re-snapshotting five thousand records every frame.
+    std::vector<infra::LogRecord> logRecords_;
+    std::vector<std::size_t> logVisible_;
+    std::uint64_t logRevision_{static_cast<std::uint64_t>(-1)};
+    std::string logFilterApplied_;
 
     std::array<char, 64> allocSize_{"4096"};
     std::array<char, 64> threadStart_{};

@@ -102,7 +102,12 @@ std::string describeChain(const domain::PointerChain& chain) {
 } // namespace
 
 void UiApp::renderScanPanel() {
-    ImGui::Begin("Scanner");
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Scanner")) {
+        ImGui::End();
+        return;
+    }
     const auto typeNames = valueTypeNames();
     const auto modeNames = scanModeNames();
 
@@ -337,7 +342,7 @@ void UiApp::renderScanPanel() {
     // Snapshotted once for the whole table rather than looked up per row. The
     // clipper keeps the row count small, but session.modules() copies a vector
     // under a lock and doing that thirty times a frame is thirty times too many.
-    const auto modules = services_.session().modules();
+    const auto& modules = cachedModules();
     const auto moduleAt = [&modules](std::uintptr_t address) -> const domain::ModuleInfo* {
         const auto module = std::find_if(modules.begin(), modules.end(), [address](const domain::ModuleInfo& m) {
             return address >= m.base && address < m.base + m.size;
@@ -439,9 +444,17 @@ void UiApp::renderScanPanel() {
     ImGui::End();
 }
 void UiApp::renderAddressListPanel() {
-    ImGui::Begin("Address List");
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Address List")) {
+        ImGui::End();
+        return;
+    }
     const auto typeNames = valueTypeNames();
-    auto entries = services_.session().addressList().snapshot();
+    // Copied when the list's revision changes rather than every frame. Edits
+    // made from the rows below land in the list itself; this copy catches up
+    // on the next frame, which is when the rows are drawn again anyway.
+    const auto& entries = cachedAddressEntries();
     statusPill(entries.empty() ? "EMPTY" : "TRACKING", entries.empty() ? colorFromBytes(63, 75, 88) : colorFromBytes(30, 111, 96));
     ImGui::SameLine();
     ImGui::TextDisabled("%zu address%s", entries.size(), entries.size() == 1 ? "" : "es");
@@ -640,7 +653,7 @@ void UiApp::renderAddressListPanel() {
     }
 
     // Same snapshot-once reasoning as the scan results table.
-    const auto modules = services_.session().modules();
+    const auto& modules = cachedModules();
     const auto moduleAt = [&modules](std::uintptr_t address) -> const domain::ModuleInfo* {
         const auto module = std::find_if(modules.begin(), modules.end(), [address](const domain::ModuleInfo& m) {
             return address >= m.base && address < m.base + m.size;
@@ -688,167 +701,175 @@ void UiApp::renderAddressListPanel() {
         ImGui::TableSetupColumn("Hotkey");
         ImGui::TableSetupColumn("Action");
         ImGui::TableHeadersRow();
-        for (auto& entry : entries) {
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(entry.group.c_str());
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(entry.description.c_str());
-            ImGui::TableNextColumn();
-            if (entry.chain && !entry.resolved) {
-                // Showing the last known address as though it were live would be
-                // a lie: the chain no longer leads anywhere.
-                ImGui::TextDisabled("unresolved");
-            } else if (const auto* module = moduleAt(entry.address); module != nullptr) {
-                ImGui::TextColored(staticAddressColor(), "%s", domain::toHex(entry.address).c_str());
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("%s+%s\n\nStatic: inside a loaded module, so this address is the same "
-                                      "offset from that module in every run.",
-                                      domain::narrow(module->name).c_str(),
-                                      domain::toHex(entry.address - module->base).c_str());
-                }
-            } else {
-                ImGui::TextUnformatted(domain::toHex(entry.address).c_str());
-            }
-            if (entry.chain) {
-                ImGui::SameLine();
-                // Amber for a chain that cannot survive a restart, so the one
-                // property that makes a chain worth having is visible on the
-                // row rather than only in the editor that created it.
-                if (entry.chain->moduleRooted()) {
-                    ImGui::TextDisabled("(P)");
+        // Rows are uniform in height, so only the ones on screen are laid out.
+        // Each row is keyed by its entry id below, so a popup opened on a row
+        // stays with that entry whatever scrolls under it.
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(entries.size()));
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                const auto& entry = entries[static_cast<std::size_t>(row)];
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(entry.group.c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(entry.description.c_str());
+                ImGui::TableNextColumn();
+                if (entry.chain && !entry.resolved) {
+                    // Showing the last known address as though it were live would be
+                    // a lie: the chain no longer leads anywhere.
+                    ImGui::TextDisabled("unresolved");
+                } else if (const auto* module = moduleAt(entry.address); module != nullptr) {
+                    ImGui::TextColored(staticAddressColor(), "%s", domain::toHex(entry.address).c_str());
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%s+%s\n\nStatic: inside a loaded module, so this address is the same "
+                                          "offset from that module in every run.",
+                                          domain::narrow(module->name).c_str(),
+                                          domain::toHex(entry.address - module->base).c_str());
+                    }
                 } else {
-                    ImGui::TextColored(colorFromBytes(232, 184, 92), "(P)");
+                    ImGui::TextUnformatted(domain::toHex(entry.address).c_str());
                 }
-                if (ImGui::IsItemHovered()) {
-                    std::string tip = describeChain(*entry.chain);
-                    tip += entry.chain->moduleRooted()
-                               ? "\n\nTracked as a pointer chain, so it re-resolves when the target restarts."
-                               : "\n\nThe base is an absolute address rather than a module offset, so this chain "
-                                 "will not survive a restart.";
-                    ImGui::SetTooltip("%s", tip.c_str());
-                }
-            }
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(domain::valueTypeName(entry.type));
-            ImGui::TableNextColumn();
-            const auto cached = currentValues_.find(entry.id);
-            const std::string current = cached == currentValues_.end() ? std::string("<unreadable>")
-                                                                       : cached->second;
-            ImGui::TextUnformatted(current.c_str());
-            ImGui::TableNextColumn();
-            ImGui::PushID(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(entry.id)));
-            bool frozen = entry.frozen;
-            if (ImGui::Checkbox("##freeze", &frozen)) {
-                services_.addressList().setFrozen(entry.id, frozen);
-            }
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(entry.hotkey.c_str());
-            ImGui::TableNextColumn();
-            if (ImGui::SmallButton("Edit")) {
-                editEntryId_ = entry.id;
-                showManualAddressEditor_ = true;
-                addAsPointer_ = entry.chain.has_value();
                 if (entry.chain) {
-                    // Put the base back the way it was written, not as the
-                    // absolute address it currently resolves to -- otherwise
-                    // pressing Apply would quietly convert a chain that survives
-                    // restarts into one that does not.
-                    copyText(addAddress_.data(), addAddress_.size(),
-                             entry.chain->moduleRooted()
-                                 ? domain::narrow(entry.chain->moduleName) + "+" +
-                                       domain::toHex(entry.chain->moduleOffset)
-                                 : domain::toHex(entry.chain->moduleOffset));
-                    std::string offsets;
-                    for (const auto offset : entry.chain->offsets) {
-                        if (!offsets.empty()) {
-                            offsets += ", ";
-                        }
-                        offsets += offset < 0 ? "-" + domain::toHex(static_cast<std::uintptr_t>(-offset))
-                                              : domain::toHex(static_cast<std::uintptr_t>(offset));
-                    }
-                    copyText(addPointerOffsets_.data(), addPointerOffsets_.size(), offsets);
-                } else {
-                    copyText(addAddress_.data(), addAddress_.size(), domain::toHex(entry.address));
-                    addPointerOffsets_.fill('\0');
-                }
-                copyText(addDescription_.data(), addDescription_.size(), entry.description);
-                copyText(addGroup_.data(), addGroup_.size(), entry.group);
-                copyText(addHotkey_.data(), addHotkey_.size(), entry.hotkey);
-                copyText(addValue_.data(), addValue_.size(), domain::formatValue(entry.type, entry.frozenValue));
-                const auto types = domain::valueTypes();
-                const auto it = std::find(types.begin(), types.end(), entry.type);
-                addTypeIndex_ = it == types.end() ? 4 : static_cast<int>(std::distance(types.begin(), it));
-            }
-            ImGui::SameLine();
-            // This used to write whatever happened to be typed in the shared
-            // manual-editor box at the top of the panel, so pressing Write on
-            // one row could store a value meant for a different one.
-            if (ImGui::SmallButton("Write")) {
-                rowWriteId_ = entry.id;
-                // Only pre-fill from the current value when it was actually
-                // read: seeding the box with "<unreadable>" made every Write
-                // click on a dead row fail with an "invalid for type" error
-                // before the user had a chance to type anything.
-                const bool readable = current != "<unreadable>" && current != "<chain broken>";
-                copyText(rowWriteValue_.data(), rowWriteValue_.size(), readable ? current : std::string{});
-                ImGui::OpenPopup("##write-value");
-            }
-            if (ImGui::BeginPopup("##write-value")) {
-                ImGui::TextDisabled("%s at %s", domain::valueTypeName(entry.type), domain::toHex(entry.address).c_str());
-                ImGui::SetNextItemWidth(scaled(180.0f));
-                const bool submitted = ImGui::InputText("##value", rowWriteValue_.data(), rowWriteValue_.size(),
-                                                        ImGuiInputTextFlags_EnterReturnsTrue);
-                ImGui::SameLine();
-                if ((ImGui::Button("Write") || submitted) && rowWriteId_ == entry.id) {
-                    if (auto value = domain::parseScanValue(entry.type, rowWriteValue_.data())) {
-                        if (services_.addressList().updateValue(entry.id, value->bytes)) {
-                            notifyInfo("Wrote " + std::string(rowWriteValue_.data()) + " to " + domain::toHex(entry.address) + ".");
-                        } else {
-                            notifyError("Could not write to " + domain::toHex(entry.address) + ".");
-                        }
+                    ImGui::SameLine();
+                    // Amber for a chain that cannot survive a restart, so the one
+                    // property that makes a chain worth having is visible on the
+                    // row rather than only in the editor that created it.
+                    if (entry.chain->moduleRooted()) {
+                        ImGui::TextDisabled("(P)");
                     } else {
-                        notifyError("Value is not valid for type " + std::string(domain::valueTypeName(entry.type)) + ".");
+                        ImGui::TextColored(colorFromBytes(232, 184, 92), "(P)");
                     }
-                    ImGui::CloseCurrentPopup();
+                    if (ImGui::IsItemHovered()) {
+                        std::string tip = describeChain(*entry.chain);
+                        tip += entry.chain->moduleRooted()
+                                   ? "\n\nTracked as a pointer chain, so it re-resolves when the target restarts."
+                                   : "\n\nThe base is an absolute address rather than a module offset, so this chain "
+                                     "will not survive a restart.";
+                        ImGui::SetTooltip("%s", tip.c_str());
+                    }
                 }
-                ImGui::EndPopup();
-            }
-            ImGui::SameLine();
-            // The question every reader asks next, so it belongs on the row
-            // rather than behind a panel they would have to know to open.
-            if (ImGui::SmallButton("Find...")) {
-                ImGui::OpenPopup("##find-access");
-            }
-            if (ImGui::BeginPopup("##find-access")) {
-                ImGui::TextDisabled("%s", domain::toHex(entry.address).c_str());
-                ImGui::Separator();
-                if (ImGui::MenuItem("Find out what writes to this address")) {
-                    beginAccessWatch(entry.address, entry.type, true);
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(domain::valueTypeName(entry.type));
+                ImGui::TableNextColumn();
+                const auto cached = currentValues_.find(entry.id);
+                const std::string current = cached == currentValues_.end() ? std::string("<unreadable>")
+                                                                           : cached->second;
+                ImGui::TextUnformatted(current.c_str());
+                ImGui::TableNextColumn();
+                ImGui::PushID(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(entry.id)));
+                bool frozen = entry.frozen;
+                if (ImGui::Checkbox("##freeze", &frozen)) {
+                    services_.addressList().setFrozen(entry.id, frozen);
                 }
-                if (ImGui::MenuItem("Find out what accesses this address")) {
-                    beginAccessWatch(entry.address, entry.type, false);
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(entry.hotkey.c_str());
+                ImGui::TableNextColumn();
+                if (ImGui::SmallButton("Edit")) {
+                    editEntryId_ = entry.id;
+                    showManualAddressEditor_ = true;
+                    addAsPointer_ = entry.chain.has_value();
+                    if (entry.chain) {
+                        // Put the base back the way it was written, not as the
+                        // absolute address it currently resolves to -- otherwise
+                        // pressing Apply would quietly convert a chain that survives
+                        // restarts into one that does not.
+                        copyText(addAddress_.data(), addAddress_.size(),
+                                 entry.chain->moduleRooted()
+                                     ? domain::narrow(entry.chain->moduleName) + "+" +
+                                           domain::toHex(entry.chain->moduleOffset)
+                                     : domain::toHex(entry.chain->moduleOffset));
+                        std::string offsets;
+                        for (const auto offset : entry.chain->offsets) {
+                            if (!offsets.empty()) {
+                                offsets += ", ";
+                            }
+                            offsets += offset < 0 ? "-" + domain::toHex(static_cast<std::uintptr_t>(-offset))
+                                                  : domain::toHex(static_cast<std::uintptr_t>(offset));
+                        }
+                        copyText(addPointerOffsets_.data(), addPointerOffsets_.size(), offsets);
+                    } else {
+                        copyText(addAddress_.data(), addAddress_.size(), domain::toHex(entry.address));
+                        addPointerOffsets_.fill('\0');
+                    }
+                    copyText(addDescription_.data(), addDescription_.size(), entry.description);
+                    copyText(addGroup_.data(), addGroup_.size(), entry.group);
+                    copyText(addHotkey_.data(), addHotkey_.size(), entry.hotkey);
+                    copyText(addValue_.data(), addValue_.size(), domain::formatValue(entry.type, entry.frozenValue));
+                    const auto types = domain::valueTypes();
+                    const auto it = std::find(types.begin(), types.end(), entry.type);
+                    addTypeIndex_ = it == types.end() ? 4 : static_cast<int>(std::distance(types.begin(), it));
                 }
-                ImGui::Separator();
-                if (ImGui::MenuItem("Dissect this")) {
-                    dissect(entry.address);
+                ImGui::SameLine();
+                // This used to write whatever happened to be typed in the shared
+                // manual-editor box at the top of the panel, so pressing Write on
+                // one row could store a value meant for a different one.
+                if (ImGui::SmallButton("Write")) {
+                    rowWriteId_ = entry.id;
+                    // Only pre-fill from the current value when it was actually
+                    // read: seeding the box with "<unreadable>" made every Write
+                    // click on a dead row fail with an "invalid for type" error
+                    // before the user had a chance to type anything.
+                    const bool readable = current != "<unreadable>" && current != "<chain broken>";
+                    copyText(rowWriteValue_.data(), rowWriteValue_.size(), readable ? current : std::string{});
+                    ImGui::OpenPopup("##write-value");
                 }
-                ImGui::EndPopup();
+                if (ImGui::BeginPopup("##write-value")) {
+                    ImGui::TextDisabled("%s at %s", domain::valueTypeName(entry.type), domain::toHex(entry.address).c_str());
+                    ImGui::SetNextItemWidth(scaled(180.0f));
+                    const bool submitted = ImGui::InputText("##value", rowWriteValue_.data(), rowWriteValue_.size(),
+                                                            ImGuiInputTextFlags_EnterReturnsTrue);
+                    ImGui::SameLine();
+                    if ((ImGui::Button("Write") || submitted) && rowWriteId_ == entry.id) {
+                        if (auto value = domain::parseScanValue(entry.type, rowWriteValue_.data())) {
+                            if (services_.addressList().updateValue(entry.id, value->bytes)) {
+                                notifyInfo("Wrote " + std::string(rowWriteValue_.data()) + " to " + domain::toHex(entry.address) + ".");
+                            } else {
+                                notifyError("Could not write to " + domain::toHex(entry.address) + ".");
+                            }
+                        } else {
+                            notifyError("Value is not valid for type " + std::string(domain::valueTypeName(entry.type)) + ".");
+                        }
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
+                ImGui::SameLine();
+                // The question every reader asks next, so it belongs on the row
+                // rather than behind a panel they would have to know to open.
+                if (ImGui::SmallButton("Find...")) {
+                    ImGui::OpenPopup("##find-access");
+                }
+                if (ImGui::BeginPopup("##find-access")) {
+                    ImGui::TextDisabled("%s", domain::toHex(entry.address).c_str());
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Find out what writes to this address")) {
+                        beginAccessWatch(entry.address, entry.type, true);
+                    }
+                    if (ImGui::MenuItem("Find out what accesses this address")) {
+                        beginAccessWatch(entry.address, entry.type, false);
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Dissect this")) {
+                        dissect(entry.address);
+                    }
+                    ImGui::EndPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Remove")) {
+                    const auto id = entry.id;
+                    const auto label = entry.description.empty() ? domain::toHex(entry.address) : entry.description;
+                    confirmAction("Remove address entry?",
+                                  "Remove \"" + label + "\" from the address list? Any freeze on it stops.",
+                                  "Remove",
+                                  [this, id] {
+                                      if (services_.addressList().remove(id)) {
+                                          notifyInfo("Entry removed.");
+                                      }
+                                  });
+                }
+                ImGui::PopID();
             }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Remove")) {
-                const auto id = entry.id;
-                const auto label = entry.description.empty() ? domain::toHex(entry.address) : entry.description;
-                confirmAction("Remove address entry?",
-                              "Remove \"" + label + "\" from the address list? Any freeze on it stops.",
-                              "Remove",
-                              [this, id] {
-                                  if (services_.addressList().remove(id)) {
-                                      notifyInfo("Entry removed.");
-                                  }
-                              });
-            }
-            ImGui::PopID();
         }
         ImGui::EndTable();
     }

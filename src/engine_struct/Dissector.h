@@ -70,6 +70,9 @@ public:
 
     [[nodiscard]] std::vector<domain::Structure> structures() const;
     [[nodiscard]] std::optional<domain::Structure> find(std::uint64_t id) const;
+    // Bumped by every change to the definitions, so a panel can keep a copy of
+    // structures() and know when it is stale.
+    [[nodiscard]] std::uint64_t revision() const;
 
     // Reads each address once and lays the structure over what came back. One
     // read per address rather than one per field: a structure with forty fields
@@ -115,6 +118,7 @@ private:
     mutable std::mutex mutex_;
     std::vector<domain::Structure> structures_;
     std::uint64_t nextId_{1};
+    std::uint64_t revision_{};
 
     // The sorted committed-region ranges the pointer heuristic searches, kept
     // between frames. Building it copies and sorts every region in the target

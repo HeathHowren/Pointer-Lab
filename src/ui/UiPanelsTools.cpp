@@ -9,7 +9,12 @@
 namespace ire::ui {
 
 void UiApp::renderPointerPanel() {
-    ImGui::Begin("Pointer Scanner", &showPointerScanner_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Pointer Scanner", &showPointerScanner_)) {
+        ImGui::End();
+        return;
+    }
     ImGui::SetNextItemWidth(scaled(220.0f));
     ImGui::InputTextWithHint("Target address", "0x7FF... or a symbol", pointerTarget_.data(), pointerTarget_.size());
     sameLineIfRoom(labeledWidth(scaled(100.0f), "Max depth"));
@@ -24,9 +29,10 @@ void UiApp::renderPointerPanel() {
     const auto typeNames = valueTypeNames();
     ImGui::Combo("Value type", &pointerTypeIndex_, typeNames.data(), static_cast<int>(typeNames.size()));
 
-    // Fetched once: the table below needs it too, and copying every chain twice
-    // a frame is not free once a scan has found thousands of them.
-    const auto chains = services_.pointerScanJob().results();
+    // Only the count here; the table below copies just the rows on screen.
+    // Copying every chain a frame was fine for hundreds and not for the ten
+    // thousand a deep scan finds.
+    const auto chainCount = services_.pointerScanJob().resultCount();
 
     if (ImGui::Button("Start pointer scan")) {
         if (!services_.session().attached()) {
@@ -42,7 +48,7 @@ void UiApp::renderPointerPanel() {
         }
     }
     ImGui::SameLine();
-    ImGui::BeginDisabled(chains.empty() || services_.pointerScanJob().progress().running);
+    ImGui::BeginDisabled(chainCount == 0 || services_.pointerScanJob().progress().running);
     if (ImGui::Button("Rescan")) {
         if (!services_.session().attached()) {
             notifyError("Attach to a process first.");
@@ -86,19 +92,28 @@ void UiApp::renderPointerPanel() {
         // changes so a new scan never shows the previous one's addresses.
         {
             const auto now = std::chrono::steady_clock::now();
-            if (chains.size() != pointerResolvedFor_ ||
+            if (chainCount != pointerResolvedFor_ ||
                 now - lastPointerResolve_ > std::chrono::milliseconds(200)) {
                 lastPointerResolve_ = now;
-                pointerResolvedFor_ = chains.size();
+                pointerResolvedFor_ = chainCount;
                 pointerResolved_.clear();
             }
         }
+        const auto& modules = cachedModules();
 
         ImGuiListClipper clipper;
-        clipper.Begin(static_cast<int>(chains.size()));
+        clipper.Begin(static_cast<int>(chainCount));
         while (clipper.Step()) {
+            const auto first = static_cast<std::size_t>(clipper.DisplayStart);
+            const auto window = services_.pointerScanJob().copyRange(
+                first, static_cast<std::size_t>(clipper.DisplayEnd - clipper.DisplayStart));
             for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-                const auto& chain = chains[static_cast<std::size_t>(row)];
+                const auto index = static_cast<std::size_t>(row) - first;
+                if (index >= window.size()) {
+                    // The result set shrank between the count and the copy.
+                    break;
+                }
+                const auto& chain = window[index];
                 ImGui::PushID(row);
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
@@ -122,7 +137,7 @@ void UiApp::renderPointerPanel() {
                 ImGui::TableNextColumn();
                 auto cached = pointerResolved_.find(row);
                 if (cached == pointerResolved_.end()) {
-                    auto resolved = engine_pointer::resolveChain(services_.session(), chain);
+                    auto resolved = engine_pointer::resolveChain(services_.session(), chain, modules);
                     cached = pointerResolved_
                                  .emplace(row, resolved ? domain::toHex(resolved.value()) : std::string())
                                  .first;
@@ -149,7 +164,12 @@ void UiApp::renderPointerPanel() {
     ImGui::End();
 }
 void UiApp::renderInjectionPanel() {
-    ImGui::Begin("Injection", &showInjection_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Injection", &showInjection_)) {
+        ImGui::End();
+        return;
+    }
     ImGui::TextDisabled("These actions run code inside the target process.");
     helpMarker("Injection can destabilise or crash the target, and anti-cheat software commonly "
                "treats it as an attack. Only use it on software you own or are authorised to modify.");
@@ -236,7 +256,12 @@ void UiApp::renderInjectionPanel() {
     ImGui::End();
 }
 void UiApp::renderLuaScannerPanel() {
-    ImGui::Begin("Lua Scanner", &showLuaScanner_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Lua Scanner", &showLuaScanner_)) {
+        ImGui::End();
+        return;
+    }
     const auto typeNames = valueTypeNames();
 
     ImGui::BeginChild("lua-scan-controls", ImVec2(0, 0),
@@ -376,7 +401,12 @@ void UiApp::renderLuaScannerPanel() {
     ImGui::End();
 }
 void UiApp::renderLuaPanel() {
-    ImGui::Begin("Lua Console", &showLuaConsole_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Lua Console", &showLuaConsole_)) {
+        ImGui::End();
+        return;
+    }
     if (ImGui::CollapsingHeader("API quick reference")) {
         ImGui::TextWrapped(
             "Target:   processes(), attach(pid), detach(), modules(), regions(), refresh()\n"
@@ -430,8 +460,14 @@ void UiApp::renderLuaPanel() {
     }
     ImGui::BeginChild("lua-output", ImVec2(0, splitH), true);
     ImGui::PushFont(monoFont_, monoFont_->LegacySize);
-    for (const auto& line : luaOutput_) {
-        ImGui::TextUnformatted(line.c_str());
+    // Clipped like every other long list: ten thousand lines of output were
+    // laid out in full every frame before.
+    ImGuiListClipper outputClipper;
+    outputClipper.Begin(static_cast<int>(luaOutput_.size()));
+    while (outputClipper.Step()) {
+        for (int row = outputClipper.DisplayStart; row < outputClipper.DisplayEnd; ++row) {
+            ImGui::TextUnformatted(luaOutput_[static_cast<std::size_t>(row)].c_str());
+        }
     }
     ImGui::PopFont();
     if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
@@ -441,7 +477,12 @@ void UiApp::renderLuaPanel() {
     ImGui::End();
 }
 void UiApp::renderLogPanel() {
-    ImGui::Begin("Logs", &showLogs_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Logs", &showLogs_)) {
+        ImGui::End();
+        return;
+    }
 
     auto& logger = infra::Logger::instance();
     static const char* levelNames[] = {"trace", "info", "warn", "error"};
@@ -487,33 +528,37 @@ void UiApp::renderLogPanel() {
     std::string filter = logFilter_.data();
     std::transform(filter.begin(), filter.end(), filter.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    const auto records = logger.snapshot();
-
-    // Matching rows are collected first so the clipper has a stable count.
-    // Without a clipper this loop laid out up to five thousand rows every
-    // frame, and did it while holding nothing back from the scan worker that
-    // is writing to the same logger.
-    std::vector<const infra::LogRecord*> visible;
-    visible.reserve(records.size());
-    for (const auto& record : records) {
-        if (!filter.empty()) {
-            std::string haystack = record.message;
-            std::transform(haystack.begin(), haystack.end(), haystack.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (haystack.find(filter) == std::string::npos) {
-                continue;
+    // Snapshotted and filtered only when something changed: the logger counts
+    // its appends and clears, so an idle log costs a counter comparison a
+    // frame rather than a copy of five thousand records and a lowercase pass
+    // over each of them.
+    const auto revision = logger.revision();
+    if (revision != logRevision_ || filter != logFilterApplied_) {
+        logRevision_ = revision;
+        logFilterApplied_ = filter;
+        logRecords_ = logger.snapshot();
+        logVisible_.clear();
+        logVisible_.reserve(logRecords_.size());
+        for (std::size_t i = 0; i < logRecords_.size(); ++i) {
+            if (!filter.empty()) {
+                std::string haystack = logRecords_[i].message;
+                std::transform(haystack.begin(), haystack.end(), haystack.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (haystack.find(filter) == std::string::npos) {
+                    continue;
+                }
             }
+            logVisible_.push_back(i);
         }
-        visible.push_back(&record);
     }
 
     ImGui::BeginChild("log-scroll", ImVec2(0, 0), true);
     ImGui::PushFont(monoFont_, monoFont_->LegacySize);
     ImGuiListClipper clipper;
-    clipper.Begin(static_cast<int>(visible.size()));
+    clipper.Begin(static_cast<int>(logVisible_.size()));
     while (clipper.Step()) {
         for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-            const auto& record = *visible[static_cast<std::size_t>(row)];
+            const auto& record = logRecords_[logVisible_[static_cast<std::size_t>(row)]];
             ImVec4 colour = ImGui::GetStyleColorVec4(ImGuiCol_Text);
             if (record.level == infra::LogLevel::Error) {
                 colour = colorFromBytes(235, 116, 91);

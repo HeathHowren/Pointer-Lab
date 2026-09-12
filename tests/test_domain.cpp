@@ -63,3 +63,19 @@ TEST_CASE("parseAddress always reads hexadecimal", "[domain]") {
         CHECK_FALSE(domain::parseAddress("1FFFFFFFFFFFFFFFF").has_value());
     }
 }
+
+#include "infra/Logger.h"
+
+// The Logs panel re-snapshots and re-filters only when this moves.
+TEST_CASE("The logger's revision moves on every append and clear", "[infra]") {
+    auto& logger = infra::Logger::instance();
+    const auto start = logger.revision();
+    logger.info("revision test");
+    const auto afterLog = logger.revision();
+    CHECK(afterLog != start);
+    // A read is not a change.
+    static_cast<void>(logger.snapshot());
+    CHECK(logger.revision() == afterLog);
+    logger.clear();
+    CHECK(logger.revision() != afterLog);
+}

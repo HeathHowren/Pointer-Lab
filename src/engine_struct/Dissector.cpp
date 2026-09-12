@@ -159,6 +159,7 @@ std::shared_ptr<const Dissector::RegionCache> Dissector::cachedRegions() const {
 
 std::uint64_t Dissector::add(std::string name) {
     std::scoped_lock lock(mutex_);
+    ++revision_;
     domain::Structure structure;
     structure.id = nextId_++;
     structure.name = name.empty() ? "Structure " + std::to_string(structure.id) : std::move(name);
@@ -168,6 +169,7 @@ std::uint64_t Dissector::add(std::string name) {
 
 infra::Result<void> Dissector::remove(std::uint64_t id) {
     std::scoped_lock lock(mutex_);
+    ++revision_;
     const auto removed = std::remove_if(structures_.begin(), structures_.end(),
                                         [id](const domain::Structure& s) { return s.id == id; });
     if (removed == structures_.end()) {
@@ -179,6 +181,7 @@ infra::Result<void> Dissector::remove(std::uint64_t id) {
 
 infra::Result<void> Dissector::rename(std::uint64_t id, std::string name) {
     std::scoped_lock lock(mutex_);
+    ++revision_;
     const auto found = std::find_if(structures_.begin(), structures_.end(),
                                     [id](const domain::Structure& s) { return s.id == id; });
     if (found == structures_.end()) {
@@ -193,6 +196,7 @@ infra::Result<void> Dissector::rename(std::uint64_t id, std::string name) {
 
 infra::Result<void> Dissector::setField(std::uint64_t id, domain::StructureField field) {
     std::scoped_lock lock(mutex_);
+    ++revision_;
     const auto structure = std::find_if(structures_.begin(), structures_.end(),
                                         [id](const domain::Structure& s) { return s.id == id; });
     if (structure == structures_.end()) {
@@ -235,6 +239,7 @@ infra::Result<void> Dissector::setField(std::uint64_t id, domain::StructureField
 
 infra::Result<void> Dissector::removeField(std::uint64_t id, std::ptrdiff_t offset) {
     std::scoped_lock lock(mutex_);
+    ++revision_;
     const auto structure = std::find_if(structures_.begin(), structures_.end(),
                                         [id](const domain::Structure& s) { return s.id == id; });
     if (structure == structures_.end()) {
@@ -270,6 +275,7 @@ infra::Result<void> Dissector::setFields(std::uint64_t id, std::vector<domain::S
     }
 
     std::scoped_lock lock(mutex_);
+    ++revision_;
     const auto structure = std::find_if(structures_.begin(), structures_.end(),
                                         [id](const domain::Structure& s) { return s.id == id; });
     if (structure == structures_.end()) {
@@ -281,7 +287,13 @@ infra::Result<void> Dissector::setFields(std::uint64_t id, std::vector<domain::S
 
 void Dissector::forgetAll() {
     std::scoped_lock lock(mutex_);
+    ++revision_;
     structures_.clear();
+}
+
+std::uint64_t Dissector::revision() const {
+    std::scoped_lock lock(mutex_);
+    return revision_;
 }
 
 std::vector<domain::Structure> Dissector::structures() const {

@@ -37,7 +37,12 @@ void UiApp::beginAccessWatch(std::uintptr_t address, domain::ValueType type, boo
 }
 
 void UiApp::renderAccessWatchPanel() {
-    ImGui::Begin("Access Watch", &showAccessWatch_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Access Watch", &showAccessWatch_)) {
+        ImGui::End();
+        return;
+    }
 
     auto& watch = services_.accessWatch();
     const bool active = watch.active();

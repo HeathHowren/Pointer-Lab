@@ -11,6 +11,7 @@
 #include "engine_pointer/PointerScanner.h"
 #include "services/RuntimeServices.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <cwctype>
@@ -316,4 +317,40 @@ TEST_CASE("Module names resolve case-insensitively", "[pointer][integration]") {
     auto resolved = engine_pointer::resolveChain(fixture.session, shouted);
     REQUIRE(resolved.has_value());
     CHECK(resolved.value() == fixture.helper.address());
+}
+
+// The Pointer Scanner panel draws through a clipper: it asks for the count and
+// copies only the rows on screen, so a deep scan's ten thousand chains are not
+// copied in full every frame.
+TEST_CASE("A pointer scan's results can be read as a window", "[pointer][integration]") {
+    AttachedHelper fixture;
+    engine_pointer::PointerScanJob job(fixture.session);
+
+    CHECK(job.resultCount() == 0);
+    CHECK(job.copyRange(0, 10).empty());
+
+    job.start(optionsFor(fixture.helper.address()));
+    REQUIRE(waitForScan(job));
+
+    const auto all = job.results();
+    REQUIRE_FALSE(all.empty());
+    CHECK(job.resultCount() == all.size());
+
+    const auto window = job.copyRange(0, 2);
+    REQUIRE(window.size() == std::min<std::size_t>(2, all.size()));
+    CHECK(window.front().offsets == all.front().offsets);
+    // Past the end is empty rather than an error, since the count and the copy
+    // are separate calls and a rescan can shrink the set between them.
+    CHECK(job.copyRange(all.size(), 5).empty());
+    CHECK(job.copyRange(all.size() - 1, 5).size() == 1);
+
+    // The overload that takes a module table resolves the same way as the one
+    // that fetches its own.
+    const auto modules = fixture.session.modules();
+    const auto direct = engine_pointer::resolveChain(fixture.session, all.front());
+    const auto shared = engine_pointer::resolveChain(fixture.session, all.front(), modules);
+    CHECK(direct.has_value() == shared.has_value());
+    if (direct && shared) {
+        CHECK(direct.value() == shared.value());
+    }
 }

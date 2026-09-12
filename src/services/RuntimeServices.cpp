@@ -65,11 +65,14 @@ void AddressListService::resolvePointerChains() {
     if (!session_.attached()) {
         return;
     }
+    // One module snapshot for every chain rather than one per chain: this
+    // runs on a timer for as long as anything is attached.
+    const auto modules = session_.modules();
     for (auto entry : session_.addressList().snapshot()) {
         if (!entry.chain) {
             continue;
         }
-        auto resolved = engine_pointer::resolveChain(session_, *entry.chain);
+        auto resolved = engine_pointer::resolveChain(session_, *entry.chain, modules);
         const bool ok = resolved.has_value();
         const auto address = ok ? resolved.value() : entry.address;
         if (ok == entry.resolved && address == entry.address) {

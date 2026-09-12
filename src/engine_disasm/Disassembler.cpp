@@ -37,6 +37,64 @@ std::uintptr_t branchTarget(const ZydisDecodedInstruction& instruction, const Zy
     return 0;
 }
 
+// The machine mode has to match the target, not the host. Decoding 32-bit
+// code as long mode does not fail cleanly -- it silently produces plausible
+// but wrong instructions, because most byte sequences decode as *something*
+// in both modes, and a REX prefix in long mode is an INC/DEC in legacy.
+bool initDecoder(bool legacy, ZydisDecoder& decoder, ZydisFormatter& formatter) {
+    const auto machineMode = legacy ? ZYDIS_MACHINE_MODE_LEGACY_32 : ZYDIS_MACHINE_MODE_LONG_64;
+    const auto stackWidth = legacy ? ZYDIS_STACK_WIDTH_32 : ZYDIS_STACK_WIDTH_64;
+    return ZYAN_SUCCESS(ZydisDecoderInit(&decoder, machineMode, stackWidth)) &&
+           ZYAN_SUCCESS(ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL));
+}
+
+// The decode loop every entry point shares: up to instructionCount
+// instructions out of the `size` bytes at `data`, which sit at `address` in
+// the target. Separate from the read so a caller that already holds the bytes
+// can decode them from several start positions without reading them again.
+std::vector<domain::Instruction> decodeBuffer(const ZydisDecoder& decoder, const ZydisFormatter& formatter,
+                                              const std::uint8_t* data, std::size_t size, std::uintptr_t address,
+                                              std::size_t instructionCount) {
+    std::vector<domain::Instruction> instructions;
+    instructions.reserve(std::min(instructionCount, size));
+    std::size_t offset{};
+    while (offset < size && instructions.size() < instructionCount) {
+        const auto runtimeAddress = static_cast<ZyanU64>(address + offset);
+
+        domain::Instruction result;
+        result.address = address + offset;
+
+        ZydisDecodedInstruction decoded{};
+        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT]{};
+        if (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, data + offset, size - offset, &decoded, operands))) {
+            char text[256]{};
+            if (ZYAN_SUCCESS(ZydisFormatterFormatInstruction(&formatter, &decoded, operands,
+                                                             decoded.operand_count_visible, text, sizeof(text),
+                                                             runtimeAddress, nullptr))) {
+                result.text = text;
+            } else {
+                result.text = ZydisMnemonicGetString(decoded.mnemonic);
+            }
+            result.bytes.assign(data + offset, data + offset + decoded.length);
+            result.branchTarget = branchTarget(decoded, operands, runtimeAddress);
+            offset += decoded.length;
+        } else {
+            // Undecodable bytes are shown as data and we resynchronise one byte
+            // later, which is what a real listing does past the end of a
+            // function. Advancing by a guessed length instead is what used to
+            // desynchronise the whole listing.
+            result.bytes.assign(1, data[offset]);
+            result.text = "db 0x" + domain::bytesToHex(result.bytes, false);
+            result.valid = false;
+            offset += 1;
+        }
+
+        instructions.push_back(std::move(result));
+    }
+
+    return instructions;
+}
+
 } // namespace
 
 std::vector<domain::Instruction> Disassembler::disassemble(domain::TargetSession& session, std::uintptr_t address,
@@ -60,60 +118,12 @@ std::vector<domain::Instruction> Disassembler::disassemble(domain::TargetSession
     }
     const auto& buffer = bytes.value();
 
-    // The machine mode has to match the target, not the host. Decoding 32-bit
-    // code as long mode does not fail cleanly -- it silently produces plausible
-    // but wrong instructions, because most byte sequences decode as *something*
-    // in both modes, and a REX prefix in long mode is an INC/DEC in legacy.
-    const bool legacy = session.bitness() == domain::Bitness::X86;
-    const auto machineMode = legacy ? ZYDIS_MACHINE_MODE_LEGACY_32 : ZYDIS_MACHINE_MODE_LONG_64;
-    const auto stackWidth = legacy ? ZYDIS_STACK_WIDTH_32 : ZYDIS_STACK_WIDTH_64;
-
     ZydisDecoder decoder;
     ZydisFormatter formatter;
-    if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, machineMode, stackWidth)) ||
-        !ZYAN_SUCCESS(ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL))) {
+    if (!initDecoder(session.bitness() == domain::Bitness::X86, decoder, formatter)) {
         return instructions;
     }
-
-    instructions.reserve(instructionCount);
-    std::size_t offset{};
-    while (offset < buffer.size() && instructions.size() < instructionCount) {
-        const auto runtimeAddress = static_cast<ZyanU64>(address + offset);
-        const auto begin = buffer.begin() + static_cast<std::ptrdiff_t>(offset);
-
-        domain::Instruction result;
-        result.address = address + offset;
-
-        ZydisDecodedInstruction decoded{};
-        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT]{};
-        if (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, buffer.data() + offset, buffer.size() - offset, &decoded,
-                                                operands))) {
-            char text[256]{};
-            if (ZYAN_SUCCESS(ZydisFormatterFormatInstruction(&formatter, &decoded, operands,
-                                                             decoded.operand_count_visible, text, sizeof(text),
-                                                             runtimeAddress, nullptr))) {
-                result.text = text;
-            } else {
-                result.text = ZydisMnemonicGetString(decoded.mnemonic);
-            }
-            result.bytes.assign(begin, begin + decoded.length);
-            result.branchTarget = branchTarget(decoded, operands, runtimeAddress);
-            offset += decoded.length;
-        } else {
-            // Undecodable bytes are shown as data and we resynchronise one byte
-            // later, which is what a real listing does past the end of a
-            // function. Advancing by a guessed length instead is what used to
-            // desynchronise the whole listing.
-            result.bytes.assign(1, buffer[offset]);
-            result.text = "db 0x" + domain::bytesToHex(result.bytes, false);
-            result.valid = false;
-            offset += 1;
-        }
-
-        instructions.push_back(std::move(result));
-    }
-
-    return instructions;
+    return decodeBuffer(decoder, formatter, buffer.data(), buffer.size(), address, instructionCount);
 }
 
 std::vector<std::uint8_t> padToInstructionBoundary(const Disassembler& disassembler, domain::TargetSession& session,
@@ -145,7 +155,9 @@ std::vector<std::uint8_t> padToInstructionBoundary(const Disassembler& disassemb
     return patch;
 }
 
-std::optional<domain::Instruction> precedingInstruction(const Disassembler& disassembler,
+// The disassembler is kept in the signature for symmetry with padToInstructionBoundary;
+// this path decodes its own window, so there is nothing to ask it.
+std::optional<domain::Instruction> precedingInstruction(const Disassembler& /*disassembler*/,
                                                         domain::TargetSession& session, std::uintptr_t address) {
     // 15 is the architectural maximum instruction length, so a lookback beyond
     // it can only add noise for the single instruction we want. 24 gives a
@@ -157,6 +169,29 @@ std::optional<domain::Instruction> precedingInstruction(const Disassembler& disa
         return std::nullopt;
     }
 
+    // One read of the whole window rather than one per start position: the 24
+    // listings used to cost 24 reads and 24 decoder set-ups per trap, and an
+    // access watch on a hot address traps constantly. When the start of the
+    // window is unmapped the read fails outright, so the window shrinks until
+    // it fits; a shorter window just means fewer start positions get a vote.
+    std::vector<std::uint8_t> window;
+    for (std::size_t back = maxLookback; back >= 1; --back) {
+        auto bytes = session.readBytes(address - back, back);
+        if (bytes && bytes.value().size() == back) {
+            window = std::move(bytes.value());
+            break;
+        }
+    }
+    if (window.empty()) {
+        return std::nullopt;
+    }
+
+    ZydisDecoder decoder;
+    ZydisFormatter formatter;
+    if (!initDecoder(session.bitness() == domain::Bitness::X86, decoder, formatter)) {
+        return std::nullopt;
+    }
+
     // Candidates, by the address the preceding instruction would start at, with
     // how many independent start positions agree on it.
     struct Candidate {
@@ -165,11 +200,14 @@ std::optional<domain::Instruction> precedingInstruction(const Disassembler& disa
     };
     std::vector<Candidate> candidates;
 
-    for (std::size_t back = maxLookback; back >= 1; --back) {
+    for (std::size_t back = window.size(); back >= 1; --back) {
         const auto start = address - back;
         // At most `back` instructions can fit in `back` bytes, since the
-        // shortest instruction is one byte.
-        const auto listing = disassembler.disassemble(session, start, back);
+        // shortest instruction is one byte. The window ends at `address`, so
+        // an instruction that would straddle it cannot decode and shows up as
+        // an invalid entry, which the loop below treats as out of phase.
+        const auto listing =
+            decodeBuffer(decoder, formatter, window.data() + (window.size() - back), back, start, back);
         if (listing.empty()) {
             continue;
         }

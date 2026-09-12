@@ -44,8 +44,9 @@ Replaces the stock `print`. Converts each argument with `tostring` semantics
 (honouring `__tostring`), joins with tabs, and appends one line to the console.
 Output appears while the script is still running.
 
-The console keeps the last 10 000 lines. On overflow the oldest 5 000 are
-dropped and a `... earlier output discarded ...` marker is inserted.
+The console panel keeps the last 10 000 lines. On overflow the oldest 5 000 are
+dropped and a `... earlier output discarded ...` marker is inserted in their
+place. The log file is not affected.
 
 ## Target
 

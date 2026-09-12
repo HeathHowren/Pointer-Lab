@@ -51,6 +51,11 @@ public:
     void cancel();
     [[nodiscard]] PointerScanProgress progress() const;
     [[nodiscard]] std::vector<domain::PointerChain> results() const;
+    // For a table that shows a window of the results: the count for the
+    // scrollbar and a copy of just the rows on screen, rather than a copy of
+    // every chain per frame.
+    [[nodiscard]] std::size_t resultCount() const;
+    [[nodiscard]] std::vector<domain::PointerChain> copyRange(std::size_t first, std::size_t count) const;
 
 private:
     void run(PointerScanOptions options);
@@ -71,6 +76,12 @@ private:
 // restart still resolves afterwards even though ASLR moved everything.
 [[nodiscard]] infra::Result<std::uintptr_t> resolveChain(domain::TargetSession& session,
                                                          const domain::PointerChain& chain);
+// The same, against a module table the caller already holds. For anything
+// resolving many chains at once: the table is copied under the session lock,
+// and copying it per chain was most of the cost of a rescan.
+[[nodiscard]] infra::Result<std::uintptr_t> resolveChain(domain::TargetSession& session,
+                                                         const domain::PointerChain& chain,
+                                                         const std::vector<domain::ModuleInfo>& modules);
 
 } // namespace ire::engine_pointer
 

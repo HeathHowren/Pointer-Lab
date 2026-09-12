@@ -89,6 +89,21 @@ std::vector<domain::PointerChain> PointerScanJob::results() const {
     return results_;
 }
 
+std::size_t PointerScanJob::resultCount() const {
+    std::scoped_lock lock(mutex_);
+    return results_.size();
+}
+
+std::vector<domain::PointerChain> PointerScanJob::copyRange(std::size_t first, std::size_t count) const {
+    std::scoped_lock lock(mutex_);
+    if (first >= results_.size()) {
+        return {};
+    }
+    const auto begin = results_.begin() + static_cast<std::ptrdiff_t>(first);
+    const auto end = results_.begin() + static_cast<std::ptrdiff_t>(std::min(results_.size(), first + count));
+    return {begin, end};
+}
+
 void PointerScanJob::run(PointerScanOptions options) {
     struct Candidate {
         std::uintptr_t address{};
@@ -275,21 +290,27 @@ void PointerScanJob::runFilter(std::uintptr_t newTarget) {
     infra::Logger::instance().info("Pointer rescan: target=" + domain::toHex(newTarget) +
                                    " chains=" + std::to_string(candidates.size()));
 
+    // One module snapshot for the whole pass rather than one per chain.
+    const auto modules = session_.modules();
     std::vector<domain::PointerChain> kept;
     std::size_t examined{};
     for (const auto& chain : candidates) {
         if (cancel_) {
             break;
         }
-        auto resolved = resolveChain(session_, chain);
+        auto resolved = resolveChain(session_, chain, modules);
         if (resolved && resolved.value() == newTarget) {
             kept.push_back(chain);
         }
         ++examined;
         fraction_ = static_cast<double>(examined) / static_cast<double>(candidates.size());
 
-        std::scoped_lock lock(mutex_);
-        status_ = "Rescan: kept " + std::to_string(kept.size()) + " of " + std::to_string(examined) + " checked";
+        // Every 64th chain rather than every chain: building the string under
+        // the lock was costing more than the reads it reported on.
+        if (examined % 64 == 0 || examined == candidates.size()) {
+            std::scoped_lock lock(mutex_);
+            status_ = "Rescan: kept " + std::to_string(kept.size()) + " of " + std::to_string(examined) + " checked";
+        }
     }
 
     const bool cancelled = cancel_;
@@ -317,6 +338,16 @@ void PointerScanJob::runFilter(std::uintptr_t newTarget) {
 }
 
 infra::Result<std::uintptr_t> resolveChain(domain::TargetSession& session, const domain::PointerChain& chain) {
+    // The table is only needed for a module-rooted chain, and copying it under
+    // the session lock is the expensive part of resolving one.
+    if (!chain.moduleRooted()) {
+        return resolveChain(session, chain, {});
+    }
+    return resolveChain(session, chain, session.modules());
+}
+
+infra::Result<std::uintptr_t> resolveChain(domain::TargetSession& session, const domain::PointerChain& chain,
+                                           const std::vector<domain::ModuleInfo>& modules) {
     using Address = infra::Result<std::uintptr_t>;
 
     if (!session.attached()) {
@@ -331,7 +362,7 @@ infra::Result<std::uintptr_t> resolveChain(domain::TargetSession& session, const
     // survive.
     std::uintptr_t moduleBase{};
     if (chain.moduleRooted()) {
-        for (const auto& module : session.modules()) {
+        for (const auto& module : modules) {
             if (sameName(module.name, chain.moduleName)) {
                 moduleBase = module.base;
                 break;

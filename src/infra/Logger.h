@@ -33,6 +33,9 @@ public:
     void error(std::string message) { log(LogLevel::Error, std::move(message)); }
 
     [[nodiscard]] std::vector<LogRecord> snapshot() const;
+    // Bumped by every append and every clear, so a reader can tell whether
+    // its last snapshot is still current without taking another.
+    [[nodiscard]] std::uint64_t revision() const;
     // Only records at or above this level are kept. Trace is very chatty during
     // a scan, so the default hides it.
     void setMinimumLevel(LogLevel level);
@@ -50,6 +53,7 @@ private:
     // a scan that logs its progress.
     std::ofstream file_;
     std::vector<LogRecord> records_;
+    std::uint64_t revision_{};
     LogLevel minimumLevel_{LogLevel::Info};
 };
 

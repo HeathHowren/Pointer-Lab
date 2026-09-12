@@ -163,6 +163,39 @@ tool name.
   address space went through a signed round trip and could land at zero.
   Both directions now clamp.
 
+### Performance
+
+- **A collapsed or hidden panel costs nothing.** Every panel used to build
+  its whole body -- table layout, memory reads, list copies -- even as a
+  hidden dock tab. All twenty-one now stop at the window title. The MCP
+  request log is drained by the frame loop rather than by its panel, so the
+  server's buffer cannot grow while the panel is out of sight.
+
+- **Per-frame copies replaced by caches with change counters.** The module
+  and region tables are copied once per session generation with names
+  narrowed once, not per panel per frame; the address list once per revision;
+  the structure definitions once per edit; the log once per append, with the
+  filter re-run only when the log or the filter text changes. The Structures
+  panel reads the target ten times a second instead of sixty.
+
+- **The Pointer Scanner and Lua Console draw through clippers.** The pointer
+  table copies only the rows on screen rather than every chain, and the
+  console lays out only the visible lines of its (now capped) output.
+
+- **Rescans and chain re-resolution snapshot the module table once** rather
+  than once per chain, and the rescan updates its status line every 64 chains
+  instead of every chain.
+
+- **Finding the instruction before an access-watch trap costs one read.** It
+  used to be twenty-four reads and twenty-four decoder set-ups per trap.
+
+- **The address resolve cache is bounded** at 1024 expressions and looks up
+  without allocating.
+
+- **An idle window in the background waits for input** instead of rendering
+  sixty frames a second. Anything that changes on its own -- a scan, a
+  script, a debugger, an agent on the MCP socket -- keeps the full rate.
+
 ## [3.1.1] — 2026-08-31
 
 No behaviour changes. This exists so the MCP reference that ships beside the

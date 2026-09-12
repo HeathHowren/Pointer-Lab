@@ -58,6 +58,7 @@ void Logger::log(LogLevel level, std::string message) {
     }
 
     records_.push_back({now, level, message, threadId});
+    ++revision_;
     if (records_.size() > maxRecords) {
         records_.erase(records_.begin(), records_.begin() + (records_.size() - trimTo));
     }
@@ -80,6 +81,11 @@ std::vector<LogRecord> Logger::snapshot() const {
     return records_;
 }
 
+std::uint64_t Logger::revision() const {
+    std::scoped_lock lock(mutex_);
+    return revision_;
+}
+
 void Logger::setMinimumLevel(LogLevel level) {
     std::scoped_lock lock(mutex_);
     minimumLevel_ = level;
@@ -93,6 +99,7 @@ LogLevel Logger::minimumLevel() const {
 void Logger::clear() {
     std::scoped_lock lock(mutex_);
     records_.clear();
+    ++revision_;
 }
 
 std::filesystem::path Logger::path() const {

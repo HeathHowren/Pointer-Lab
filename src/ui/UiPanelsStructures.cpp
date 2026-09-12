@@ -86,10 +86,15 @@ std::vector<std::uintptr_t> UiApp::structureAddressList() {
 }
 
 void UiApp::renderStructuresPanel() {
-    ImGui::Begin("Structures", &showStructures_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Structures", &showStructures_)) {
+        ImGui::End();
+        return;
+    }
 
     auto& dissector = services_.dissector();
-    const auto structures = dissector.structures();
+    const auto& structures = cachedStructures();
 
     statusPill(structures.empty() ? "EMPTY" : "READY",
                structures.empty() ? colorFromBytes(63, 75, 88) : colorFromBytes(30, 111, 96));
@@ -214,7 +219,28 @@ void UiApp::renderStructuresPanel() {
         return;
     }
 
-    auto snapshot = dissector.read(structureId_, addresses);
+    // Ten reads a second rather than sixty: each is a ReadProcessMemory per
+    // address, and a value refreshed at 10 Hz reads the same to the eye.
+    // Anything that changes what the read means -- another structure, other
+    // addresses, a field edit, a re-attach -- refreshes it at once.
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const auto generation = services_.session().generation();
+        const auto revision = dissector.revision();
+        const bool stale = !structureSnapshot_ || structureReadId_ != structureId_ ||
+                           structureReadAddresses_ != addresses || structureReadGeneration_ != generation ||
+                           structureReadRevision_ != revision ||
+                           now - lastStructureRead_ > std::chrono::milliseconds(100);
+        if (stale) {
+            structureSnapshot_ = dissector.read(structureId_, addresses);
+            structureReadId_ = structureId_;
+            structureReadAddresses_ = addresses;
+            structureReadGeneration_ = generation;
+            structureReadRevision_ = revision;
+            lastStructureRead_ = now;
+        }
+    }
+    auto& snapshot = *structureSnapshot_;
     if (!snapshot) {
         ImGui::Separator();
         ImGui::TextWrapped("%s", snapshot.error().c_str());

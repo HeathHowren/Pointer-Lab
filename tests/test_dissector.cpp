@@ -387,3 +387,36 @@ TEST_CASE("The dissector refuses what it cannot show", "[struct][integration]") 
     REQUIRE(fixture.dissector.remove(id).has_value());
     CHECK_FALSE(fixture.dissector.read(id, {fixture.scratch()}).has_value());
 }
+
+// The Structures panel keeps a copy of the definitions and refreshes it when
+// this counter moves, so every change to them has to move it.
+TEST_CASE("The dissector's revision moves with every edit", "[struct][integration]") {
+    Fixture fixture;
+    auto& dissector = fixture.dissector;
+
+    const auto start = dissector.revision();
+    const auto id = dissector.add("Player");
+    const auto afterAdd = dissector.revision();
+    CHECK(afterAdd != start);
+
+    REQUIRE(dissector.setField(id, {0x00, domain::ValueType::Int32, 0, "health"}).has_value());
+    const auto afterField = dissector.revision();
+    CHECK(afterField != afterAdd);
+
+    REQUIRE(dissector.rename(id, "Enemy").has_value());
+    const auto afterRename = dissector.revision();
+    CHECK(afterRename != afterField);
+
+    REQUIRE(dissector.removeField(id, 0x00).has_value());
+    const auto afterRemoveField = dissector.revision();
+    CHECK(afterRemoveField != afterRename);
+
+    // Reads do not count: the panel reads ten times a second and must not
+    // invalidate its own copy by doing so.
+    static_cast<void>(dissector.read(id, {fixture.scratch()}));
+    static_cast<void>(dissector.structures());
+    CHECK(dissector.revision() == afterRemoveField);
+
+    REQUIRE(dissector.remove(id).has_value());
+    CHECK(dissector.revision() != afterRemoveField);
+}

@@ -31,7 +31,12 @@ constexpr Preset presets[]{
 } // namespace
 
 void UiApp::renderSpeedPanel() {
-    ImGui::Begin("Speed and Export", &showSpeed_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Speed and Export", &showSpeed_)) {
+        ImGui::End();
+        return;
+    }
 
     const bool attached = services_.session().attached();
     // Polled four times a second rather than every frame: reading the status
@@ -161,7 +166,7 @@ void UiApp::renderSpeedPanel() {
         "It is also the difference between a program you have read and a program of unknown provenance "
         "you are about to point at your own machine.");
 
-    const auto entries = services_.session().addressList().snapshot();
+    const auto& entries = cachedAddressEntries();
     std::size_t exportable = 0;
     for (const auto& entry : entries) {
         if (!entry.frozenValue.empty()) {

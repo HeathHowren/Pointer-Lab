@@ -7,7 +7,12 @@
 namespace ire::ui {
 
 void UiApp::renderProcessPanel() {
-    ImGui::Begin("Process Selection");
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Process Selection")) {
+        ImGui::End();
+        return;
+    }
     statusPill(services_.session().attached() ? "CONNECTED" : "BROWSE", services_.session().attached() ? colorFromBytes(30, 111, 96) : colorFromBytes(63, 75, 88));
     ImGui::SameLine();
     ImGui::TextDisabled("%zu processes", processes_.size());
@@ -90,12 +95,16 @@ void UiApp::renderProcessPanel() {
     ImGui::End();
 }
 void UiApp::renderModulesPanel() {
-    ImGui::Begin("Modules", &showModules_);
-    // Snapshotted once for the whole panel: session.modules() takes the lock
-    // and copies every ModuleInfo, and the two wstring pairs it contains are
-    // narrowed twice per row -- doing that for the count and the loop was
-    // twice as much per-frame work as needed.
-    const auto modules = services_.session().modules();
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Modules", &showModules_)) {
+        ImGui::End();
+        return;
+    }
+    // Cached across frames on the session generation, names already narrowed:
+    // session.modules() takes the lock and copies every ModuleInfo, and this
+    // panel used to do that, and narrow two wstrings per row, every frame.
+    const auto& modules = cachedModules();
     ImGui::BeginDisabled(!services_.session().attached());
     if (ImGui::Button("Refresh")) {
         services_.session().refresh();
@@ -129,11 +138,9 @@ void UiApp::renderModulesPanel() {
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(formatSize(module.size).c_str());
                 ImGui::TableNextColumn();
-                const auto name = domain::narrow(module.name);
-                cellText(name.c_str());
+                cellText(cachedModuleNames_[static_cast<std::size_t>(row)].c_str());
                 ImGui::TableNextColumn();
-                const auto path = domain::narrow(module.path);
-                cellText(path.c_str());
+                cellText(cachedModulePaths_[static_cast<std::size_t>(row)].c_str());
             }
         }
         ImGui::EndTable();
@@ -141,8 +148,13 @@ void UiApp::renderModulesPanel() {
     ImGui::End();
 }
 void UiApp::renderRegionsPanel() {
-    ImGui::Begin("Memory Regions", &showMemoryRegions_);
-    const auto regions = services_.session().regions();
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Memory Regions", &showMemoryRegions_)) {
+        ImGui::End();
+        return;
+    }
+    const auto& regions = cachedRegions();
     ImGui::BeginDisabled(!services_.session().attached());
     if (ImGui::Button("Refresh")) {
         services_.session().refresh();

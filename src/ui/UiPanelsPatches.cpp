@@ -7,7 +7,12 @@
 namespace ire::ui {
 
 void UiApp::renderPatchesPanel() {
-    ImGui::Begin("Patches", &showPatches_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Patches", &showPatches_)) {
+        ImGui::End();
+        return;
+    }
 
     auto& registry = services_.patches();
     const auto patches = registry.patches();

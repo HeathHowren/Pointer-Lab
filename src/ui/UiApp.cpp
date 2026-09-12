@@ -114,6 +114,13 @@ int UiApp::run() {
 
     bool done = false;
     while (!done) {
+        // In the background with nothing running, wait for input (or a tenth
+        // of a second) instead of rendering sixty frames a second nobody sees.
+        // Anything that changes on its own -- a scan, a script, a debugger, an
+        // agent on the MCP socket -- counts as busy and keeps the full rate.
+        if (!focused_ && !busy()) {
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 100, QS_ALLINPUT);
+        }
         MSG msg{};
         while (PeekMessageW(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
             TranslateMessage(&msg);
@@ -227,6 +234,9 @@ LRESULT UiApp::handleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             applyStyleSizes();
         }
         return 0;
+    case WM_ACTIVATEAPP:
+        focused_ = wParam != FALSE;
+        break;
     case WM_SYSCOMMAND:
         if ((wParam & 0xfff0) == SC_KEYMENU) {
             return 0;
@@ -404,6 +414,24 @@ void UiApp::render() {
     for (auto& line : lua_.takeOutput()) {
         luaOutput_.push_back(std::move(line));
     }
+    // The same cap and marker the console's own buffer uses, because this is
+    // where the lines actually accumulate: the console is drained every frame.
+    if (luaOutput_.size() > 10000) {
+        luaOutput_.erase(luaOutput_.begin(), luaOutput_.begin() + 5000);
+        luaOutput_.insert(luaOutput_.begin(), "... earlier output discarded ...");
+    }
+    // And the MCP request log, drained here rather than in its panel so the
+    // server's buffer cannot grow while the panel is closed or collapsed.
+    for (auto& line : mcpServer_.takeLog()) {
+        mcpLog_.push_back(std::move(line));
+    }
+    // Kept to roughly a screenful of history times ten. Older than that and it
+    // is the log file's job.
+    constexpr std::size_t maxMcpLines = 500;
+    if (mcpLog_.size() > maxMcpLines) {
+        mcpLog_.erase(mcpLog_.begin(),
+                      mcpLog_.begin() + static_cast<std::ptrdiff_t>(mcpLog_.size() - maxMcpLines));
+    }
 
     // A handle to a process that has exited stays valid; without this the
     // status pills would keep saying ATTACHED / WATCHING while every read
@@ -498,6 +526,65 @@ void UiApp::render() {
         Sleep(16);
     }
 }
+bool UiApp::busy() {
+    if (services_.scanJob().progress().running || services_.pointerScanJob().progress().running ||
+        services_.luaScanJob().progress().running || lua_.running() || mcpServer_.running() ||
+        services_.breakpoints().debuggerAttached() || services_.accessWatch().active() || !toasts_.empty() ||
+        pendingConfirm_.has_value()) {
+        return true;
+    }
+    std::scoped_lock lock(automationMutex_);
+    return !automationQueue_.empty();
+}
+
+void UiApp::refreshTargetCache() {
+    // Attach, detach and refresh are the only things that change either table,
+    // and each of them bumps the generation.
+    const auto generation = services_.session().generation();
+    if (generation == targetCacheGeneration_) {
+        return;
+    }
+    targetCacheGeneration_ = generation;
+    cachedModules_ = services_.session().modules();
+    cachedRegions_ = services_.session().regions();
+    cachedModuleNames_.clear();
+    cachedModulePaths_.clear();
+    cachedModuleNames_.reserve(cachedModules_.size());
+    cachedModulePaths_.reserve(cachedModules_.size());
+    for (const auto& module : cachedModules_) {
+        cachedModuleNames_.push_back(domain::narrow(module.name));
+        cachedModulePaths_.push_back(domain::narrow(module.path));
+    }
+}
+
+const std::vector<domain::ModuleInfo>& UiApp::cachedModules() {
+    refreshTargetCache();
+    return cachedModules_;
+}
+
+const std::vector<domain::MemoryRegion>& UiApp::cachedRegions() {
+    refreshTargetCache();
+    return cachedRegions_;
+}
+
+const std::vector<domain::AddressEntry>& UiApp::cachedAddressEntries() {
+    const auto revision = services_.session().addressList().revision();
+    if (revision != addressCacheRevision_) {
+        addressCacheRevision_ = revision;
+        cachedAddressEntries_ = services_.session().addressList().snapshot();
+    }
+    return cachedAddressEntries_;
+}
+
+const std::vector<domain::Structure>& UiApp::cachedStructures() {
+    const auto revision = services_.dissector().revision();
+    if (revision != structureCacheRevision_) {
+        structureCacheRevision_ = revision;
+        cachedStructures_ = services_.dissector().structures();
+    }
+    return cachedStructures_;
+}
+
 void UiApp::requestDetach() {
     const auto liveBreakpoints = services_.breakpoints().breakpoints().size();
     const auto allPatches = services_.patches().patches();

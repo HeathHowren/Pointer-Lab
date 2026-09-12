@@ -32,17 +32,27 @@ std::optional<std::uintptr_t> UiApp::resolveAddressCached(const char* text) {
         resolveCacheGeneration_ = generation;
         resolveCache_.clear();
     }
-    const std::string key = text;
-    if (const auto found = resolveCache_.find(key); found != resolveCache_.end()) {
+    if (const auto found = resolveCache_.find(std::string_view(text)); found != resolveCache_.end()) {
         return found->second;
     }
+    // Bounded: every distinct expression ever typed used to stay for the life
+    // of the attachment. Dropping the lot is fine, since each entry costs one
+    // resolve to rebuild.
+    if (resolveCache_.size() >= 1024) {
+        resolveCache_.clear();
+    }
     const auto resolved = resolveAddress(text);
-    resolveCache_.emplace(key, resolved);
+    resolveCache_.emplace(text, resolved);
     return resolved;
 }
 
 void UiApp::renderSymbolsPanel() {
-    ImGui::Begin("Symbols", &showSymbols_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("Symbols", &showSymbols_)) {
+        ImGui::End();
+        return;
+    }
 
     auto& table = services_.symbols();
     const auto symbols = table.symbols();
@@ -99,7 +109,7 @@ void UiApp::renderSymbolsPanel() {
         // the modules vector under a lock for every symbol on every frame,
         // which for a table of fifty was fifty deep copies to answer a question
         // one modules snapshot could answer for all of them.
-        const auto modules = services_.session().modules();
+        const auto& modules = cachedModules();
         const auto staticFor = [&modules](std::uintptr_t address) {
             const auto it = std::find_if(modules.begin(), modules.end(),
                                          [address](const domain::ModuleInfo& m) {

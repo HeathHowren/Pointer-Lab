@@ -13,7 +13,12 @@
 namespace ire::ui {
 
 void UiApp::renderMcpPanel() {
-    ImGui::Begin("MCP Server", &showMcp_);
+    // Nothing below is worth doing for a collapsed window or a hidden dock
+    // tab, and every panel used to do all of it anyway.
+    if (!ImGui::Begin("MCP Server", &showMcp_)) {
+        ImGui::End();
+        return;
+    }
 
     const bool running = mcpServer_.running();
     statusPill(running ? "LISTENING" : "OFF",
@@ -139,20 +144,9 @@ void UiApp::renderMcpPanel() {
 
     ImGui::Separator();
 
-    // Drained rather than copied, so the server's own buffer cannot grow without
-    // bound while this panel is closed -- the same arrangement the Lua console
-    // uses for its output.
-    for (auto& line : mcpServer_.takeLog()) {
-        mcpLog_.push_back(std::move(line));
-    }
-    // Kept to roughly a screenful of history times ten. Older than that and it is
-    // the log file's job.
-    constexpr std::size_t maxLines = 500;
-    if (mcpLog_.size() > maxLines) {
-        mcpLog_.erase(mcpLog_.begin(),
-                      mcpLog_.begin() + static_cast<std::ptrdiff_t>(mcpLog_.size() - maxLines));
-    }
-
+    // The request log is drained into mcpLog_ by UiApp::render, not here: this
+    // body is skipped while the panel is collapsed or a hidden tab, and the
+    // server's own buffer must not grow for as long as that lasts.
     ImGui::TextDisabled("Requests");
     ImGui::SameLine();
     if (ImGui::SmallButton("Clear")) {
