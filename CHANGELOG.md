@@ -3,10 +3,14 @@
 All notable changes to Pointer Lab are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [3.2.0] — 2026-09-11
 
-Bug fixes only. Nothing here changes a file format, a panel, a menu path or a
-tool name.
+The audit release. Every finding from a pass over 3.1.1 -- crashes and hangs,
+then the narrower correctness bugs, then per-frame cost, then polish -- is
+fixed here, with a test for each one that could have one. Nothing changes a
+file format, a menu path or a tool name. The minor bump is for the Lua side:
+`refresh()` is new, `read`/`write` gained `str` and `wstr`, and `read` takes a
+length for them.
 
 ### Fixed
 
