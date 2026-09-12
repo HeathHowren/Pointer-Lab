@@ -212,3 +212,31 @@ TEST_CASE("The result limit is reported as truncation, not completion", "[scan][
     CHECK(job.progress().truncated);
     CHECK(job.progress().status.find("limit") != std::string::npos);
 }
+
+TEST_CASE("Cancelling a next scan keeps the previous results", "[scan][integration]") {
+    AttachedHelper fixture;
+    engine_scan::ScanJob job(fixture.session, testOptions());
+
+    // Enough candidates that the filter cannot possibly finish before it is
+    // cancelled: each one is a separate cross-process read. The same address
+    // repeated is fine for that; the scanner does not care.
+    std::vector<domain::ScanResult> candidates;
+    candidates.reserve(500000);
+    const auto bytes = int32Value(needleValue).bytes;
+    for (std::size_t i = 0; i < 500000; ++i) {
+        candidates.push_back({fixture.helper.address(), bytes, bytes, bytes});
+    }
+
+    // "Changed" against a value that has not changed would, if allowed to
+    // finish, keep nothing at all -- which is what makes the count below a
+    // test of the cancel path and not of the filter.
+    job.startNext(domain::ScanMode::Changed, int32Value(0), candidates);
+    job.cancel();
+
+    REQUIRE_FALSE(job.progress().running);
+    CHECK(job.progress().status.find("cancelled") != std::string::npos);
+    // The bug: the partial survivor list -- empty here -- replaced the whole
+    // candidate set, and a scan stopped a tenth of the way through silently
+    // discarded the nine tenths it had not looked at.
+    CHECK(job.resultCount() == candidates.size());
+}

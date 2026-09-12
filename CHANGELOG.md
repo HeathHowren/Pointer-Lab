@@ -3,6 +3,74 @@
 All notable changes to Pointer Lab are recorded here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Bug fixes only. Nothing here changes a file format, a panel, a menu path or a
+tool name.
+
+### Fixed
+
+- **A window request that timed out could run against a dead stack frame.**
+  A mutating MCP tool call, or a script's `save_project`/`load_project`, waits
+  up to 20 seconds for the UI thread to run it. On timeout the request was
+  left in the queue "in case it still runs" -- and it did, later, writing its
+  result into a stack frame that had long since returned. The wait was easy to
+  exhaust: the window did not serve the queue at all while minimised, or while
+  a native file dialog was open. A request that has not been picked up is now
+  withdrawn on timeout; one the UI thread has already taken is waited for, and
+  the queue is served while minimised.
+
+- **Stopping the MCP server from the panel could freeze the window for 20
+  seconds.** Stop joins the server thread from the UI thread. If a tool call
+  was in flight it was waiting for the UI thread to run it, and the UI thread
+  was waiting for it to finish. The join now pumps the request queue.
+
+- **The Lua Scanner ran predicates with the whole standard library open and no
+  way to stop them.** `io`, `os.execute` and `package.loadlib` were all live
+  in the scanner's Lua state, and a predicate that never returned hung the
+  window for good on Stop. The scanner now applies the same sandbox as the
+  console and runs the predicate under the same cancel hook. The sandbox itself
+  is also closed off: `io` could be recovered from the registry through
+  `debug.getregistry()`, and no longer can.
+
+- **Cancelling a Next scan threw the results away.** Stopping a filter part-way
+  through installed the survivors found so far as the new result set, so a
+  scan cancelled a tenth of the way in kept a tenth of the survivors and
+  silently dropped everything it had not yet looked at. The previous results
+  are now kept, as the pointer scanner's rescan already did.
+
+- **Project and settings files were truncated before being written.** A crash,
+  a full disk or a power cut mid-save left a zero-length or partial file: for
+  settings that meant a silent reset to defaults, for a project it meant the
+  user's work. Both are now written to a temporary file beside the target and
+  moved into place only once complete.
+
+- **`read_bytes` in Lua accepted any size.** A size with a few zeros too many
+  went straight into an allocation, and the resulting exception unwound
+  through Lua's C frames and out of the worker thread, terminating the
+  application. The size is now capped at 4096, matching the MCP tool, and the
+  script thread catches what it cannot foresee.
+
+- **A Lua error raised from a console function could crash the application,
+  depending on code layout.** Lua is built as C, so `luaL_error` is a
+  `longjmp`, and on x64 MSVC a `longjmp` runs the C++ unwinder through every
+  frame it crosses. The default `/EHsc` tells the compiler an `extern "C"`
+  call can never unwind, so no unwind state was recorded at those call sites,
+  and the unwinder used whichever state happened to precede the call in the
+  binary. For one function that state said a result vector was live when it
+  had never been constructed. The Lua-facing translation units are now
+  compiled with `/EHc-`, so every such call site carries its exact state.
+  Found by the new `read_bytes` test, which crashed on the first build and
+  passed on the second with no source change between them.
+
+- **The speed payload could not be re-enabled after being disabled.** Its
+  worker thread returned after restoring the imports, and since the DLL stays
+  loaded, a second Enable found it, wrote a scale nothing was reading, and
+  reported success. The worker now idles after an unhook and hooks again on
+  the next request. The payload also unhooks if something else unloads it with
+  `FreeLibrary`, rather than leaving the game's import table pointing into an
+  unmapped module.
+
 ## [3.1.1] — 2026-08-31
 
 No behaviour changes. This exists so the MCP reference that ships beside the

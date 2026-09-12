@@ -497,3 +497,51 @@ TEST_CASE("An unrecognised record is skipped rather than failing the load", "[st
     REQUIRE(loaded.value().entries.size() == 1);
     CHECK(loaded.value().entries[0].description == "kept");
 }
+
+TEST_CASE("A save that cannot complete leaves the previous project intact", "[storage]") {
+    // Autosave runs on every exit. The file used to be opened with
+    // std::ios::trunc, so a crash or a full disk after that point left a
+    // truncated table where the user's work had been.
+    TempFile file("atomic_save.iretable");
+    storage::ProjectStore store;
+
+    storage::ProjectTable table;
+    table.entries.push_back(makeEntry(1, 0x1000, "kept"));
+    REQUIRE(store.save(file.path(), table).has_value());
+    std::ifstream in(file.path(), std::ios::binary);
+    const std::string before((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    REQUIRE_FALSE(before.empty());
+
+    const auto blocker = std::filesystem::path(file.path().native() + L".tmp");
+    std::error_code ec;
+    std::filesystem::create_directory(blocker, ec);
+    REQUIRE(std::filesystem::is_directory(blocker, ec));
+
+    table.entries.push_back(makeEntry(2, 0x2000, "lost"));
+    const auto failed = store.save(file.path(), table);
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(failed.error().find("Could not write the project file") != std::string::npos);
+
+    std::ifstream after(file.path(), std::ios::binary);
+    const std::string contents((std::istreambuf_iterator<char>(after)), std::istreambuf_iterator<char>());
+    CHECK(contents == before);
+
+    // And the surviving file still loads as the table it was.
+    after.close();
+    auto loaded = store.load(file.path());
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded.value().entries.size() == 1);
+    CHECK(loaded.value().entries[0].description == "kept");
+
+    std::filesystem::remove(blocker, ec);
+}
+
+TEST_CASE("A successful project save leaves no temporary file behind", "[storage]") {
+    TempFile file("atomic_save_clean.iretable");
+    storage::ProjectStore store;
+    REQUIRE(store.save(file.path(), storage::ProjectTable{}).has_value());
+    std::error_code ec;
+    CHECK_FALSE(std::filesystem::exists(std::filesystem::path(file.path().native() + L".tmp"), ec));
+    CHECK(std::filesystem::exists(file.path(), ec));
+}

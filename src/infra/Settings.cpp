@@ -1,5 +1,6 @@
 #include "infra/Settings.h"
 
+#include "infra/AtomicFile.h"
 #include "infra/Logger.h"
 
 #include <cstdlib>
@@ -193,18 +194,17 @@ Settings loadSettings(const std::filesystem::path& path) {
 }
 
 bool saveSettings(const std::filesystem::path& path, const Settings& settings) {
-    std::error_code code;
-    std::filesystem::create_directories(path.parent_path(), code);
-
-    std::ofstream out(path, std::ios::trunc);
-    if (!out) {
-        return false;
+    // Atomically, so a crash mid-write cannot leave a half-written file that
+    // fails the header check and resets every setting to its default.
+    const auto written = writeFileAtomically(path, std::ios::out, [&settings](std::ostream& out) {
+        out << settingsHeader << '\n';
+        forEachField(settings,
+                     [&out](const char* name, const auto& value) { out << name << '=' << format(value) << '\n'; });
+    });
+    if (!written) {
+        Logger::instance().warn("Settings were not saved: " + written.error());
     }
-
-    out << settingsHeader << '\n';
-    forEachField(settings, [&out](const char* name, const auto& value) { out << name << '=' << format(value) << '\n'; });
-    out.flush();
-    return static_cast<bool>(out);
+    return written.has_value();
 }
 
 } // namespace ire::infra

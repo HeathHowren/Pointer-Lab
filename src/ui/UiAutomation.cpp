@@ -63,9 +63,25 @@ infra::Result<void> UiApp::submitRequest(std::shared_ptr<AutomationRequest> requ
     automationQueue_.push_back(request);
     const bool ran = automationDone_.wait_for(lock, requestTimeout, [&request] { return request->finished; });
     if (!ran) {
-        // The request is deliberately left in the queue: it may still run, and
-        // removing it from under a drain in progress is worse than a late one.
-        return Result<void>::fail("The window did not respond within 20 seconds.");
+        // Two different situations end up here, and telling them apart is what
+        // makes the by-reference captures in runOnUiThread's callers safe.
+        //
+        // If the drain has already taken the request, the UI thread is inside
+        // its work right now (or about to be), and that work writes into this
+        // caller's stack frame. Returning would turn the write into a
+        // use-after-free, so the only correct thing is to keep waiting: the UI
+        // thread has it in hand and will finish it.
+        //
+        // If it is still queued, nothing has touched it, so it is withdrawn.
+        // Leaving it there -- which is what used to happen -- meant a window
+        // that was minimised, or sat behind a native file dialog, for 20
+        // seconds ran the request against a frame that had long since returned.
+        if (request->taken) {
+            automationDone_.wait(lock, [&request] { return request->finished; });
+        } else {
+            std::erase(automationQueue_, request);
+            return Result<void>::fail("The window did not respond within 20 seconds.");
+        }
     }
     if (!request->ok) {
         return Result<void>::fail(request->error);
@@ -184,9 +200,11 @@ void UiApp::drainAutomation() {
             return;
         }
         // Screenshots stay behind for drainScreenshots(); everything else is
-        // taken in order.
+        // taken in order. Marked as taken under the lock, so a submitter whose
+        // wait expires between here and the work running knows to keep waiting.
         for (auto& request : automationQueue_) {
             if (request->kind != AutomationRequest::Kind::Screenshot) {
+                request->taken = true;
                 ready.push_back(request);
             }
         }
@@ -237,6 +255,9 @@ void UiApp::drainAutomation() {
             // a wait rather than a no-op.
             if (--request->first > 0) {
                 std::scoped_lock lock(automationMutex_);
+                // Back in the queue and no longer in hand, so a submitter that
+                // gives up on a long wait can withdraw it.
+                request->taken = false;
                 automationQueue_.push_back(request);
                 continue;
             }
@@ -278,6 +299,7 @@ void UiApp::drainScreenshots() {
         std::scoped_lock lock(automationMutex_);
         for (auto& request : automationQueue_) {
             if (request->kind == AutomationRequest::Kind::Screenshot) {
+                request->taken = true;
                 ready.push_back(request);
             }
         }

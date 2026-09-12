@@ -115,7 +115,8 @@ failure message is not available.
 ### `read_bytes(address, size)` → string | nil
 
 Returns an uppercase, space-separated hex string (`"48 8B 05"`), or `nil` if the
-read failed outright.
+read failed outright. `size` must be between 1 and 4096, the same cap as the
+MCP `read_bytes` tool; anything else raises. Read a larger range in pieces.
 
 A **partial** read is not an error here: you may get back fewer than `size`
 bytes, and an empty string is possible. Check the length yourself if it matters.
@@ -306,7 +307,7 @@ notification that happens to appear can end up in a figure. The cost is that a
 panel dragged out into its own OS window will not be in the picture — see
 `set_layout` below.
 
-It is the one exception to the sandbox, which otherwise removes `io` entirely.
+It is the one exception to the sandbox, which otherwise removes `io`.
 It writes one file, of one format, holding a picture of this program's own
 window; it is not a way back to arbitrary writes.
 
@@ -354,12 +355,18 @@ would be if you had closed it yourself.
 These are removed before your script runs:
 
 - **Globals:** `io`, `package`, `require`, `dofile`, `loadfile`
+- **From the registry's loaded-module table:** `io` and `package`, so they
+  cannot be fetched back from there
+- **From `debug`:** `getregistry`
 - **From `os`:** `execute`, `remove`, `rename`, `tmpname`, `exit`, `getenv`,
   `setlocale`
 
 Everything else from the standard library remains, including `os.time`,
 `os.clock`, `os.date`, `os.difftime`, `load`, `string`, `table`, `math`,
-`coroutine` and `debug`.
+`coroutine` and the rest of `debug`.
+
+The Lua Scanner panel runs its `function(ctx)` predicate in a separate Lua
+state, and that state gets exactly the same sandbox and the same cancel hook.
 
 This is a guard against a careless script, not a security boundary. `load` is
 still present, and a memory-editing tool hands you the ability to write

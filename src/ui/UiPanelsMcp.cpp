@@ -128,7 +128,10 @@ void UiApp::renderMcpPanel() {
     }
     ImGui::SameLine();
     if (ImGui::SmallButton("Stop server")) {
-        mcpServer_.stop();
+        // Pumped while joining: a tool call in flight is waiting for this
+        // thread to run it, and joining without serving it was a 20-second
+        // freeze followed by the call failing anyway.
+        mcpServer_.stop([this] { drainAutomation(); });
         notifyInfo("MCP server stopped.");
         ImGui::End();
         return;

@@ -10,8 +10,10 @@
 #include "HelperProcess.h"
 
 #include "scripting/LuaConsole.h"
+#include "scripting/LuaScanner.h"
 #include "services/RuntimeServices.h"
 
+#include <algorithm>
 #include <chrono>
 #include <string>
 #include <thread>
@@ -434,4 +436,132 @@ TEST_CASE("Every scan mode the parser accepts is named in its error message", "[
         INFO("mode missing from the message: " << mode);
         CHECK(anyContains(output, mode));
     }
+}
+
+TEST_CASE("read_bytes refuses a size it could not allocate", "[lua]") {
+    // The size used to go straight into a vector's constructor. A typo with a
+    // few zeros too many threw std::bad_alloc through Lua's C frames and out of
+    // the worker thread, which terminated the whole application.
+    Console fixture;
+    const auto output = run(fixture.console,
+                            "print(pcall(read_bytes, 0, 1 << 40))\n"
+                            "print(pcall(read_bytes, 0, 0))\n"
+                            "print(pcall(read_bytes, 0, -1))\n");
+    REQUIRE(output.size() == 3);
+}
+
+
+TEST_CASE("The sandbox cannot be recovered through the registry", "[lua]") {
+    // Nil-ing the io global left the module itself sitting in the registry's
+    // table of loaded modules, one debug.getregistry() away.
+    Console fixture;
+    const auto output = run(fixture.console,
+                            "print('getregistry', debug.getregistry)\n"
+                            "print('traceback', type(debug.traceback))\n");
+    REQUIRE(output.size() == 2);
+    CHECK(output[0] == "getregistry\tnil");
+    // The rest of debug stays: tracebacks are the reason it is there.
+    CHECK(output[1] == "traceback\tfunction");
+}
+
+// ---------------------------------------------------------------------------
+// The Lua Scanner. It has its own Lua state, and that state used to be opened
+// with the whole standard library and no hook: a predicate could run programs,
+// and one that never returned could not be stopped.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+bool waitForLuaScan(scripting::LuaScanJob& job, std::chrono::seconds timeout = std::chrono::seconds(60)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!job.progress().running) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+scripting::LuaScanOptions predicateOptions(std::string script) {
+    scripting::LuaScanOptions options;
+    options.type = domain::ValueType::Int32;
+    options.script = std::move(script);
+    options.writableOnly = true;
+    return options;
+}
+
+} // namespace
+
+TEST_CASE("The Lua Scanner runs its predicate in the same sandbox as the console", "[lua][integration]") {
+    testsupport::AttachedHelper fixture;
+    scripting::LuaScanJob job(fixture.session);
+
+    job.start(predicateOptions("if io ~= nil then error('io is present') end\n"
+                               "if package ~= nil then error('package is present') end\n"
+                               "if os.execute ~= nil then error('os.execute is present') end\n"
+                               "if debug.getregistry ~= nil then error('debug.getregistry is present') end\n"
+                               "return function(ctx) return false end\n"));
+    REQUIRE(waitForLuaScan(job));
+    const auto progress = job.progress();
+    INFO(progress.error);
+    CHECK(progress.error.empty());
+    CHECK(progress.status == "Lua scan complete");
+}
+
+TEST_CASE("A runaway Lua Scanner predicate can be stopped", "[lua][integration]") {
+    testsupport::AttachedHelper fixture;
+    scripting::LuaScanJob job(fixture.session);
+
+    job.start(predicateOptions("return function(ctx) while true do end end"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    REQUIRE(job.progress().running);
+
+    // cancel() joins the worker. Before the hook, this call never returned.
+    const auto started = std::chrono::steady_clock::now();
+    job.cancel();
+    const auto waited = std::chrono::steady_clock::now() - started;
+    CHECK(waited < std::chrono::seconds(5));
+    CHECK_FALSE(job.progress().running);
+    CHECK(job.progress().status.find("cancelled") != std::string::npos);
+}
+
+TEST_CASE("A Lua Scanner chunk that never returns a predicate can be stopped too", "[lua][integration]") {
+    testsupport::AttachedHelper fixture;
+    scripting::LuaScanJob job(fixture.session);
+
+    // The loop is in the chunk that is supposed to build the predicate, not in
+    // the predicate itself, which is a different call into Lua.
+    job.start(predicateOptions("while true do end"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    REQUIRE(job.progress().running);
+
+    const auto started = std::chrono::steady_clock::now();
+    job.cancel();
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(5));
+    CHECK_FALSE(job.progress().running);
+}
+
+TEST_CASE("A Lua Scanner predicate that errors reports the error", "[lua][integration]") {
+    testsupport::AttachedHelper fixture;
+    scripting::LuaScanJob job(fixture.session);
+
+    job.start(predicateOptions("return function(ctx) return ctx.no_such_field.x end"));
+    REQUIRE(waitForLuaScan(job));
+    const auto progress = job.progress();
+    CHECK(progress.status == "Lua scan failed");
+    CHECK(progress.error.find("attempt to index") != std::string::npos);
+}
+
+TEST_CASE("The Lua Scanner finds a known value", "[lua][integration]") {
+    testsupport::AttachedHelper fixture;
+    scripting::LuaScanJob job(fixture.session);
+
+    job.start(predicateOptions("return function(ctx) return ctx.value == " + std::to_string(needleValue) + " end"));
+    REQUIRE(waitForLuaScan(job));
+    CHECK(job.progress().error.empty());
+    const auto results = job.results();
+    CHECK(std::any_of(results.begin(), results.end(), [&fixture](const domain::ScanResult& result) {
+        return result.address == fixture.helper.address();
+    }));
 }

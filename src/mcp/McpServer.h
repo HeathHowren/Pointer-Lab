@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -39,7 +40,13 @@ public:
     // and port() then reports what it chose. Fails with a sentence rather than a
     // code -- "that port is already in use" is something the user can act on.
     infra::Result<void> start(std::uint16_t port);
-    void stop();
+    // Closes the listener and joins the worker. `pump`, when given, is called
+    // repeatedly while waiting for the worker to finish. The UI thread passes
+    // its request drain here: a mutating tool call in flight is blocked waiting
+    // for the UI thread to run it, and a UI thread blocked in join() would never
+    // get round to that. Without a pump the two wait on each other until the
+    // call's own timeout gives up.
+    void stop(const std::function<void()>& pump = {});
 
     [[nodiscard]] bool running() const { return running_; }
     [[nodiscard]] std::uint16_t port() const { return port_; }
@@ -67,6 +74,9 @@ private:
     Protocol protocol_;
 
     std::atomic<bool> running_{false};
+    // Set by the worker as its last act, so stop() can pump until it is safe
+    // to join without blocking.
+    std::atomic<bool> workerFinished_{true};
     std::atomic<std::uint64_t> requests_{0};
     std::uint16_t port_{};
     // INVALID_SOCKET, spelled without including winsock2.h in this header.

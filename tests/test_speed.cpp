@@ -207,3 +207,27 @@ TEST_CASE("Nothing can be sped up without a target", "[speed]") {
     CHECK(speed.reset().has_value());
     CHECK_FALSE(speed.status().loaded);
 }
+
+TEST_CASE("Speed can be enabled again after the hook was removed", "[speed][integration]") {
+    Fixture fixture;
+    REQUIRE(fixture.speed.load().has_value());
+    REQUIRE(waitForRunning(fixture.speed));
+
+    REQUIRE(fixture.speed.reset().has_value());
+    for (int waited = 0; waited < 4000 && fixture.speed.status().running; waited += 25) {
+        pause(25);
+    }
+    REQUIRE_FALSE(fixture.speed.status().running);
+
+    // The payload's worker used to return after unhooking. The module was
+    // still loaded, so a second Enable found it, wrote a scale that nothing
+    // was reading, and reported success while the game ran at real time.
+    REQUIRE(fixture.speed.setScale(4.0).has_value());
+    REQUIRE(waitForRunning(fixture.speed));
+    REQUIRE(waitForScale(fixture.speed, 4.0));
+    CHECK(fixture.speed.status().hookedImports > 0);
+
+    const auto normal = 200;
+    const auto fast = observedElapsed(fixture.attached.helper, normal);
+    CHECK(fast > normal * 2);
+}

@@ -208,6 +208,11 @@ private:
         // request carries no result of its own -- whatever the work needs to
         // report, it reports through what it captured.
         std::function<void()> work;
+        // Set by the drain, under the queue lock, the moment it takes the
+        // request out of the queue. From then on the UI thread owns it: a
+        // submitter whose wait expires must keep waiting rather than abandon
+        // it, because `work` captures the submitter's own stack by reference.
+        bool taken{};
         bool finished{};
         bool ok{true};
         std::string error;

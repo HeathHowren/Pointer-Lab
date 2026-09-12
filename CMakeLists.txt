@@ -171,6 +171,7 @@ add_library(pointerlab_core STATIC
     src/engine_struct/Dissector.cpp
     src/engine_symbols/ExportResolver.cpp
     src/engine_symbols/SymbolTable.cpp
+    src/infra/AtomicFile.cpp
     src/infra/CrashHandler.cpp
     src/infra/Logger.cpp
     src/infra/Paths.cpp
@@ -186,11 +187,32 @@ add_library(pointerlab_core STATIC
     src/mcp/McpToolsControl.cpp
     src/platform_win32/Win32Platform.cpp
     src/scripting/LuaConsole.cpp
+    src/scripting/LuaSandbox.cpp
     src/scripting/LuaScanner.cpp
     src/services/RuntimeServices.cpp
     src/services/UiCommands.cpp
     src/storage/ProjectStore.cpp
 )
+
+# Lua is built as C, so a Lua error is a longjmp, and every lua_CFunction in
+# these two files is a C++ frame that longjmp unwinds through. MSVC's longjmp
+# runs the C++ unwinder, and the default /EHsc tells the compiler that a call
+# to an extern "C" function can never unwind -- so it records no unwind state
+# at the luaL_error call sites. The unwinder then takes whichever state entry
+# happens to precede the call in address order, and when the compiler laid the
+# error path out after the function's main path, that was "the result vector
+# is live": it destroyed an object that had never been constructed. Which
+# functions crashed depended on code layout, which is why it surfaced as a
+# heisenbug in read_bytes and nowhere else. /EHc- withdraws the assumption, so
+# the states at those call sites are recorded exactly.
+if(MSVC)
+    set_source_files_properties(
+        src/scripting/LuaConsole.cpp
+        src/scripting/LuaScanner.cpp
+        src/scripting/LuaSandbox.cpp
+        PROPERTIES COMPILE_OPTIONS "/EHs;/EHc-"
+    )
+endif()
 
 # UiApp is one class across several translation units, grouped by area. It was a
 # single 2500-line file, roughly five times the next largest, and the only

@@ -168,7 +168,8 @@ infra::Result<void> SpeedController::reset() {
     if (auto written = writeAs<double>(session_, requested, 1.0); !written) {
         return written;
     }
-    // The payload's worker restores every import it patched and then stops.
+    // The payload's worker restores every import it patched and then idles,
+    // watching for the next request; pl_alive reads 0 until then.
     return writeAs<std::int32_t>(session_, unhook, 1);
 }
 

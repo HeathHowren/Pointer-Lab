@@ -1,6 +1,7 @@
 #include "scripting/LuaScanner.h"
 
 #include "infra/Logger.h"
+#include "scripting/LuaSandbox.h"
 
 #include <lua.hpp>
 
@@ -21,6 +22,27 @@ struct LuaStateDeleter {
         }
     }
 };
+
+// The cancel flag lives in the state's extra space, so the hook can find it
+// without an upvalue. Lua copies the main thread's extra space into every
+// coroutine it creates, which is what lets the hook run on the predicate's own
+// thread.
+std::atomic_bool* cancelFlagOf(lua_State* state) {
+    return *static_cast<std::atomic_bool**>(lua_getextraspace(state));
+}
+
+// A predicate that never returns -- "while true do end" -- used to be
+// uninterruptible: cancel() joins the worker, the worker was inside lua_pcall,
+// and Stop hung the window for good. The predicate now runs on a coroutine
+// with this count hook, which yields when asked to stop. A yield, unlike an
+// error, cannot be caught by a pcall inside the predicate, so there is no
+// script shape that survives it.
+void cancelHook(lua_State* state, lua_Debug*) {
+    auto* cancel = cancelFlagOf(state);
+    if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) {
+        lua_yield(state, 0);
+    }
+}
 
 template <typename T>
 T unpack(const std::vector<std::uint8_t>& bytes) {
@@ -182,22 +204,51 @@ void LuaScanJob::run(LuaScanOptions options) {
 
     std::unique_ptr<lua_State, LuaStateDeleter> state(luaL_newstate());
     luaL_openlibs(state.get());
+    // The same sandbox as the console. A scanner predicate is the same kind of
+    // pasted text, and it arrives in the same project files.
+    applySandbox(state.get());
+    *static_cast<std::atomic_bool**>(lua_getextraspace(state.get())) = &cancel_;
+
+    const auto fail = [this](std::string message) {
+        std::scoped_lock lock(mutex_);
+        error_ = std::move(message);
+        status_ = "Lua scan failed";
+        running_ = false;
+    };
+    const auto errorText = [](lua_State* from, const char* fallback) {
+        const char* message = lua_tostring(from, -1);
+        return std::string(message != nullptr ? message : fallback);
+    };
+
+    // Both the chunk that builds the predicate and every call of it run on this
+    // coroutine, under the cancel hook. Anchored in the registry so the
+    // collector leaves it alone for the length of the scan.
+    lua_State* thread = lua_newthread(state.get());
+    const int threadRef = luaL_ref(state.get(), LUA_REGISTRYINDEX);
+    lua_sethook(thread, &cancelHook, LUA_MASKCOUNT, sandboxHookInterval);
+
     const std::string wrapped = "return (function()\n" + options.script + "\nend)()";
-    if (luaL_loadstring(state.get(), wrapped.c_str()) != LUA_OK || lua_pcall(state.get(), 0, 1, 0) != LUA_OK) {
+    if (luaL_loadstring(thread, wrapped.c_str()) != LUA_OK) {
+        fail(errorText(thread, "Could not compile Lua predicate."));
+        return;
+    }
+    int results = 0;
+    int status = lua_resume(thread, state.get(), 0, &results);
+    if (status == LUA_YIELD) {
         std::scoped_lock lock(mutex_);
-        error_ = lua_tostring(state.get(), -1) ? lua_tostring(state.get(), -1) : "Could not compile Lua predicate.";
-        status_ = "Lua scan failed";
+        status_ = "Lua scan cancelled";
         running_ = false;
         return;
     }
-    if (!lua_isfunction(state.get(), -1)) {
-        std::scoped_lock lock(mutex_);
-        error_ = "Lua script must return function(ctx) ... end.";
-        status_ = "Lua scan failed";
-        running_ = false;
+    if (status != LUA_OK) {
+        fail(errorText(thread, "Could not compile Lua predicate."));
         return;
     }
-    const int predicateRef = luaL_ref(state.get(), LUA_REGISTRYINDEX);
+    if (results != 1 || !lua_isfunction(thread, -1)) {
+        fail("Lua script must return function(ctx) ... end.");
+        return;
+    }
+    const int predicateRef = luaL_ref(thread, LUA_REGISTRYINDEX);
 
     const auto regions = session_.regions();
     const auto total = totalBytes(regions, options);
@@ -227,17 +278,22 @@ void LuaScanJob::run(LuaScanOptions options) {
             for (std::size_t i = 0; i + valueSize <= buffer.size() && !cancel_; i += stride) {
                 std::vector<std::uint8_t> current(buffer.begin() + static_cast<std::ptrdiff_t>(i), buffer.begin() + static_cast<std::ptrdiff_t>(i + valueSize));
 
-                lua_rawgeti(state.get(), LUA_REGISTRYINDEX, predicateRef);
-                pushContext(state.get(), options.type, region.base + offset + i, region, current);
-                if (lua_pcall(state.get(), 1, 1, 0) != LUA_OK) {
-                    std::scoped_lock lock(mutex_);
-                    error_ = lua_tostring(state.get(), -1) ? lua_tostring(state.get(), -1) : "Lua predicate failed.";
-                    status_ = "Lua scan failed";
-                    running_ = false;
+                lua_rawgeti(thread, LUA_REGISTRYINDEX, predicateRef);
+                pushContext(thread, options.type, region.base + offset + i, region, current);
+                // A coroutine whose body returned is reusable: with a function
+                // on its empty stack, the next resume starts it afresh. That is
+                // what keeps this from creating a thread per candidate.
+                status = lua_resume(thread, state.get(), 1, &results);
+                if (status == LUA_YIELD) {
+                    // The cancel hook. The loop condition sees the flag next.
+                    break;
+                }
+                if (status != LUA_OK) {
+                    fail(errorText(thread, "Lua predicate failed."));
                     return;
                 }
-                const bool matched = lua_toboolean(state.get(), -1) != 0;
-                lua_pop(state.get(), 1);
+                const bool matched = results > 0 && lua_toboolean(thread, -1) != 0;
+                lua_pop(thread, results);
 
                 if (matched) {
                     batch.push_back({region.base + offset + i, current, current});
@@ -267,6 +323,7 @@ void LuaScanJob::run(LuaScanOptions options) {
         status_ = cancel_ ? "Lua scan cancelled or capped" : "Lua scan complete";
     }
     luaL_unref(state.get(), LUA_REGISTRYINDEX, predicateRef);
+    luaL_unref(state.get(), LUA_REGISTRYINDEX, threadRef);
     running_ = false;
     infra::Logger::instance().info("Lua scan finished.");
 }

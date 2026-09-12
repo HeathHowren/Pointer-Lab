@@ -174,3 +174,36 @@ TEST_CASE("Saving creates the directory it needs", "[settings]") {
 
     std::filesystem::remove_all(directory, code);
 }
+
+TEST_CASE("A save that cannot complete leaves the previous file intact", "[settings]") {
+    // The file used to be opened with std::ios::trunc, so a failure after that
+    // point -- or a crash -- left it empty and every setting reset to default.
+    TempSettings temp;
+    infra::Settings original;
+    original.scanMaxResults = 123;
+    REQUIRE(infra::saveSettings(temp.path(), original));
+    const auto before = temp.read();
+    REQUIRE_FALSE(before.empty());
+
+    // A directory squatting on the temporary's name is the simplest way to make
+    // the write fail before the swap.
+    const auto blocker = std::filesystem::path(temp.path().native() + L".tmp");
+    std::error_code ec;
+    std::filesystem::create_directory(blocker, ec);
+    REQUIRE(std::filesystem::is_directory(blocker, ec));
+
+    infra::Settings changed;
+    changed.scanMaxResults = 456;
+    CHECK_FALSE(infra::saveSettings(temp.path(), changed));
+    CHECK(temp.read() == before);
+
+    std::filesystem::remove(blocker, ec);
+}
+
+TEST_CASE("A successful save leaves no temporary file behind", "[settings]") {
+    TempSettings temp;
+    REQUIRE(infra::saveSettings(temp.path(), infra::Settings{}));
+    std::error_code ec;
+    CHECK_FALSE(std::filesystem::exists(std::filesystem::path(temp.path().native() + L".tmp"), ec));
+    CHECK(std::filesystem::exists(temp.path(), ec));
+}

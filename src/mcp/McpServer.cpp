@@ -144,6 +144,7 @@ infra::Result<void> McpServer::start(std::uint16_t port) {
     }
     listener_ = static_cast<std::uintptr_t>(listener);
     running_ = true;
+    workerFinished_ = false;
     worker_ = std::jthread([this] { serve(); });
 
     infra::Logger::instance().info("MCP server listening on " + url() + ".");
@@ -151,7 +152,7 @@ infra::Result<void> McpServer::start(std::uint16_t port) {
     return Result<void>::ok();
 }
 
-void McpServer::stop() {
+void McpServer::stop(const std::function<void()>& pump) {
     if (!running_ && listener_ == invalidSocket) {
         return;
     }
@@ -165,6 +166,12 @@ void McpServer::stop() {
         listener_ = invalidSocket;
     }
     if (worker_.joinable()) {
+        if (pump) {
+            while (!workerFinished_) {
+                pump();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
         worker_.join();
     }
     {
@@ -189,6 +196,7 @@ void McpServer::serve() {
         }
         handleConnection(static_cast<std::uintptr_t>(client));
     }
+    workerFinished_ = true;
 }
 
 void McpServer::handleConnection(std::uintptr_t clientHandle) {

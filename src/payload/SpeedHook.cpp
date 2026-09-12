@@ -145,10 +145,13 @@ __declspec(dllexport) volatile double pl_applied_scale = 1.0;
 __declspec(dllexport) volatile LONG pl_hook_count = 0;
 // Set to 1 by Pointer Lab to put every patched entry back. The DLL stays
 // loaded: unloading a module while another thread might be executing inside it
-// is a crash, and there is no way to prove none is.
+// is a crash, and there is no way to prove none is. The worker stays too, idle,
+// and hooks again the next time a scale other than 1.0 is asked for -- it used
+// to return here, after which a second Enable found the module loaded, wrote a
+// scale nobody was reading, and did nothing.
 __declspec(dllexport) volatile LONG pl_unhook = 0;
-// So Pointer Lab can tell "the payload is loaded and running" from "the export
-// resolved but the worker never started".
+// So Pointer Lab can tell "the payload is loaded and hooked" from "the export
+// resolved but the worker never started" -- and from "the hooks were removed".
 __declspec(dllexport) volatile LONG pl_alive = 0;
 
 } // extern "C"
@@ -445,16 +448,33 @@ DWORD WINAPI worker(LPVOID) {
 
     double applied = pl_applied_scale;
     int sinceRescan = 0;
+    bool hooked = true;
     for (;;) {
         if (InterlockedCompareExchange(&pl_unhook, 0, 0) != 0) {
             applyScale(1.0);
+            applied = 1.0;
             unpatchEverything();
+            hooked = false;
             InterlockedExchange(&pl_unhook, 0);
             InterlockedExchange(&pl_alive, 0);
-            return 0;
         }
 
         const double requested = pl_requested_scale;
+        if (!hooked) {
+            // Unhooked and idle. A request for anything other than real time
+            // is the signal to hook again; until then there is nothing to do
+            // but keep polling, since DllMain will not run a second time for a
+            // module that is already loaded.
+            if (requested != 1.0 && requested > 0.0) {
+                patchEverything();
+                hooked = true;
+                sinceRescan = 0;
+                InterlockedExchange(&pl_alive, 1);
+            } else {
+                Sleep(8);
+                continue;
+            }
+        }
         if (requested != applied && requested > 0.0) {
             applyScale(requested);
             applied = requested;
@@ -483,7 +503,7 @@ DWORD WINAPI worker(LPVOID) {
 
 } // namespace
 
-BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID lpReserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_self = module;
         DisableThreadLibraryCalls(module);
@@ -494,11 +514,21 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
             CloseHandle(thread);
         }
     } else if (reason == DLL_PROCESS_DETACH) {
-        // The process is going away; putting the imports back would only race
-        // with threads that are already being torn down.
-        if (g_lockReady) {
-            DeleteCriticalSection(&g_lock);
-            g_lockReady = false;
+        // Pointer Lab never unloads this module, for the reason given at
+        // pl_unhook. But something else -- the game's own cleanup, another
+        // tool -- may call FreeLibrary on it, and lpReserved is null exactly
+        // then. The imports must go back before the code they point at is
+        // unmapped, or the next call the game makes to ask the time jumps into
+        // nothing. On process exit (lpReserved non-null) the other threads are
+        // already gone and the image outlives every remaining call, so the
+        // hooks are left alone.
+        //
+        // The critical section is left standing in both cases. Deleting it
+        // while a patched slot still leads into a hook was a deleted-lock entry
+        // from whichever thread asked the time next, and the cost of never
+        // deleting it is one leaked lock in a process that is closing.
+        if (lpReserved == nullptr && g_patchCount > 0) {
+            unpatchEverything();
         }
     }
     return TRUE;

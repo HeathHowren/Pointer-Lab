@@ -3,6 +3,7 @@
 #include "domain/Domain.h"
 #include "engine_pointer/PointerScanner.h"
 #include "infra/Logger.h"
+#include "scripting/LuaSandbox.h"
 #include "services/UiCommands.h"
 
 #include <algorithm>
@@ -16,9 +17,13 @@ namespace ire::scripting {
 
 namespace {
 
-// How many VM instructions run between cancel checks. Small enough that a
-// runaway loop stops the moment it is asked, large enough not to matter.
-constexpr int hookInterval = 10000;
+constexpr int hookInterval = sandboxHookInterval;
+
+// The most read_bytes will read in one call, matching the MCP read_bytes
+// tool. The size used to go straight into a vector's constructor, so a typo
+// with one zero too many threw std::bad_alloc up through Lua's C frames and
+// out of the worker thread, which took the whole application with it.
+constexpr lua_Integer maxReadBytes = 4096;
 
 // Windows module names are case-insensitive, and the case a script passes a path
 // in need not match what the loader reports.
@@ -48,20 +53,6 @@ void pushFunction(lua_State* state, LuaConsole* console, const char* name, lua_C
     lua_pushlightuserdata(state, console);
     lua_pushcclosure(state, fn, 1);
     lua_setglobal(state, name);
-}
-
-void clearGlobal(lua_State* state, const char* name) {
-    lua_pushnil(state);
-    lua_setglobal(state, name);
-}
-
-void clearField(lua_State* state, const char* table, const char* field) {
-    lua_getglobal(state, table);
-    if (lua_istable(state, -1)) {
-        lua_pushnil(state);
-        lua_setfield(state, -2, field);
-    }
-    lua_pop(state, 1);
 }
 
 void pushTyped(lua_State* state, domain::ValueType type, const std::vector<std::uint8_t>& bytes) {
@@ -187,7 +178,20 @@ void LuaConsole::execute(std::string code) {
     lua_sethook(thread, &LuaConsole::countHook, LUA_MASKCOUNT, hookInterval);
 
     int results = 0;
-    const int status = lua_resume(thread, state_, 0, &results);
+    int status = LUA_OK;
+    // Lua is built as C, so a C++ exception thrown inside an API function --
+    // an allocation that failed, say -- unwinds through frames that know
+    // nothing about it and out of this thread, which is std::terminate. Every
+    // API function is meant to check its inputs first; this is the backstop for
+    // the one that does not.
+    try {
+        status = lua_resume(thread, state_, 0, &results);
+    } catch (const std::exception& error) {
+        appendOutput(std::string("Script failed: ") + error.what());
+        lua_settop(state_, threadIndex - 1);
+        running_ = false;
+        return;
+    }
 
     if (status == LUA_YIELD) {
         // Nothing in the API yields, so this is the cancel hook and only the
@@ -231,20 +235,9 @@ int LuaConsole::traceback(lua_State* state) {
 }
 
 void LuaConsole::applySandbox() {
-    // Pointer Lab scripts exist to inspect and edit process memory. Nothing in
-    // that job needs to touch the file system, spawn programs or load native
-    // modules, and leaving those exposed turns a pasted script into arbitrary
-    // code execution on the machine.
-    clearGlobal(state_, "io");
-    clearGlobal(state_, "package");
-    clearGlobal(state_, "require");
-    clearGlobal(state_, "dofile");
-    clearGlobal(state_, "loadfile");
-
-    // os keeps only the parts that report time.
-    for (const char* removed : {"execute", "remove", "rename", "tmpname", "exit", "getenv", "setlocale"}) {
-        clearField(state_, "os", removed);
-    }
+    // Shared with the Lua Scanner, which used to open the whole standard
+    // library and sandbox none of it.
+    scripting::applySandbox(state_);
 }
 
 void LuaConsole::registerApi() {
@@ -456,7 +449,12 @@ int LuaConsole::l_write_u32(lua_State* state) {
 int LuaConsole::l_read_bytes(lua_State* state) {
     auto* console = self(state);
     const auto address = static_cast<std::uintptr_t>(luaL_checkinteger(state, 1));
-    const auto size = static_cast<std::size_t>(luaL_checkinteger(state, 2));
+    const lua_Integer requested = luaL_checkinteger(state, 2);
+    if (requested < 1 || requested > maxReadBytes) {
+        return luaL_error(state, "read_bytes size must be between 1 and %d, not %d.",
+                          static_cast<int>(maxReadBytes), static_cast<int>(requested));
+    }
+    const auto size = static_cast<std::size_t>(requested);
     auto bytes = console->services_.session().readBytes(address, size);
     if (!bytes) {
         lua_pushnil(state);

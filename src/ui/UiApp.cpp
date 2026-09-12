@@ -53,8 +53,10 @@ UiApp::~UiApp() {
     // would otherwise find uiCommands() null, decide there is no window to
     // marshal onto, and run itself inline against engines that are being
     // destroyed. Stopping the server joins its thread, so by the time this
-    // returns there is no call in flight to worry about.
-    mcpServer_.stop();
+    // returns there is no call in flight to worry about. The queue is pumped
+    // while waiting, because a call in flight may be blocked on this very
+    // thread running it.
+    mcpServer_.stop([this] { drainAutomation(); });
     // Before anything is torn down: a script thread blocked on a request must
     // not find a half-destroyed window on the other end of it.
     services::setUiCommands(nullptr);
@@ -124,7 +126,12 @@ int UiApp::run() {
             break;
         }
         if (minimized_) {
-            // Nothing is visible; yield instead of rendering at full rate.
+            // Nothing is visible; yield instead of rendering at full rate. The
+            // request queue is still served, though: an agent driving the
+            // window over MCP does not know or care that it is minimised, and
+            // every mutating tool call used to sit out its full timeout here.
+            // Screenshots stay queued, since there is no frame to capture.
+            drainAutomation();
             Sleep(16);
             continue;
         }

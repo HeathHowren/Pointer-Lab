@@ -1,5 +1,6 @@
 #include "storage/ProjectStore.h"
 
+#include "infra/AtomicFile.h"
 #include "infra/Logger.h"
 
 #include <cctype>
@@ -133,16 +134,29 @@ std::optional<std::uint64_t> parseUnsigned(const std::string& text, int base) {
     }
 }
 
+// The whole file, in order, to whatever stream it is handed.
+void writeTable(std::ostream& out, const ProjectTable& table);
+
 } // namespace
 
 infra::Result<void> ProjectStore::save(const std::filesystem::path& path, const ProjectTable& table) const {
-    std::error_code ignored;
-    std::filesystem::create_directories(path.parent_path(), ignored);
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        return infra::Result<void>::fail("Could not open project file for writing.");
+    // Written beside the real file and moved into place once complete. This
+    // used to open the project file itself with std::ios::trunc, so a crash or
+    // a full disk part-way through -- and autosave runs on every exit -- left
+    // a truncated table where the user's work had been.
+    const auto written = infra::writeFileAtomically(path, std::ios::binary, [&table](std::ostream& out) {
+        writeTable(out, table);
+    });
+    if (!written) {
+        return infra::Result<void>::fail("Could not write the project file: " + written.error());
     }
+    infra::Logger::instance().info("Saved " + std::to_string(table.entries.size()) + " entries to " + path.string());
+    return infra::Result<void>::ok();
+}
 
+namespace {
+
+void writeTable(std::ostream& out, const ProjectTable& table) {
     out << "IRETABLE " << currentFormatVersion << "\n";
     out << "pid|" << table.lastPid << "\n";
     out << "process|" << escape(domain::narrow(table.lastProcessName)) << "\n";
@@ -187,14 +201,9 @@ infra::Result<void> ProjectStore::save(const std::filesystem::path& path, const 
             << std::hex << (entry.chain ? entry.chain->moduleOffset : 0) << std::dec << '|'
             << (entry.chain ? formatOffsets(entry.chain->offsets) : "") << "\n";
     }
-
-    out.flush();
-    if (!out) {
-        return infra::Result<void>::fail("Could not write the project file (the disk may be full or read-only).");
-    }
-    infra::Logger::instance().info("Saved " + std::to_string(table.entries.size()) + " entries to " + path.string());
-    return infra::Result<void>::ok();
 }
+
+} // namespace
 
 infra::Result<ProjectTable> ProjectStore::load(const std::filesystem::path& path) const {
     std::ifstream in(path, std::ios::binary);

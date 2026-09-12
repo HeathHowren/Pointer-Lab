@@ -50,7 +50,8 @@ public:
     infra::Result<void> setScale(double scale);
     // Back to normal speed and every patched import restored. The payload stays
     // loaded -- unloading a module while a thread may be executing inside it is
-    // a crash with no way to prove it will not happen.
+    // a crash with no way to prove it will not happen -- and its worker stays
+    // idle, so a later setScale() hooks again without a second injection.
     infra::Result<void> reset();
     [[nodiscard]] SpeedStatus status() const;
     // Forgets the addresses of the control block. Called on detach: they name

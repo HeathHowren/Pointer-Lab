@@ -396,7 +396,8 @@ void ScanJob::scanNext(domain::ScanMode mode, domain::ScanValue value, std::vect
     infra::Logger::instance().info(std::string("Next scan: mode=") + domain::scanModeName(mode) +
                                    " type=" + domain::valueTypeName(value.type) +
                                    " candidates=" + std::to_string(previous.size()));
-    const auto total = std::max<std::size_t>(1, previous.size());
+    const auto candidates = previous.size();
+    const auto total = std::max<std::size_t>(1, candidates);
     std::vector<domain::ScanResult> next;
     next.reserve(std::min(total, options_.maxResults));
     const std::size_t valueSize = value.bytes.size();
@@ -435,16 +436,28 @@ void ScanJob::scanNext(domain::ScanMode mode, domain::ScanValue value, std::vect
     std::size_t kept{};
     {
         std::scoped_lock lock(mutex_);
-        results_ = std::move(next);
-        kept = results_.size();
-        status_ = cancel_ ? "Next scan cancelled" : "Next scan complete";
+        if (cancel_) {
+            // The candidates go back as they were. Installing the partial
+            // survivor list instead -- which is what used to happen -- meant a
+            // scan stopped a tenth of the way through kept a tenth of the
+            // survivors and silently dropped every candidate it had not yet
+            // looked at, presented as nothing worse than "cancelled". The
+            // pointer scanner's rescan already behaved this way.
+            results_ = std::move(previous);
+            kept = results_.size();
+            status_ = "Next scan cancelled. The previous results were kept.";
+        } else {
+            results_ = std::move(next);
+            kept = results_.size();
+            status_ = "Next scan complete";
+        }
     }
 
     const auto elapsed =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
     infra::Logger::instance().info("Next scan finished: " + std::to_string(kept) + " of " +
-                                   std::to_string(previous.size()) + " survived in " + std::to_string(elapsed) + " ms" +
-                                   (cancel_ ? " (cancelled)" : ""));
+                                   std::to_string(candidates) + " survived in " + std::to_string(elapsed) + " ms" +
+                                   (cancel_ ? " (cancelled, previous results kept)" : ""));
     running_ = false;
 }
 
