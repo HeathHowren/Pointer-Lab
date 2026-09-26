@@ -22,7 +22,7 @@ disassemble and patch them. It is a research and learning tool — see
 [Intended use](#intended-use) before pointing it at anything.
 
 Pointer Lab is written by Heath Howren
-([Cyborg Elf](https://www.youtube.com/c/cyborgelf)) of
+([Cyborg Elf](https://www.youtube.com/cyborgelf)) of
 [Game Reversal Club](https://gamereversal.club) as a companion tool to
 [*The Game Hacker's Handbook*](https://gamereversal.club/books/game-hackers-handbook/).
 Its page on the club's site is
