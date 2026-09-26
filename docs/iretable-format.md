@@ -13,8 +13,8 @@ IRETABLE 3
 pid|4812
 process|helper.exe
 bitness|x64
-entry|1|7ff6a1c02040|i32|1|Player health|Stats|F1|64000000|||
-entry|2|0|i32|0|Score|Stats||||helper.exe|3040|10,8
+entry|1|7ff6a1c02040|i32|1|Player health|Stats|F1|64000000||0|
+entry|2|0|i32|0|Score|Stats|||helper.exe|3040|10,8
 ```
 
 - **Line 1 is the header** and must be exactly `IRETABLE 1`, `IRETABLE 2` or
@@ -198,6 +198,10 @@ Fields 0–8 are required; a row with fewer than nine fields is skipped. Fields
 simply means every entry is a fixed address — which is all those versions could
 express.
 
+For a fixed address, Pointer Lab writes fields 9–11 as an empty module, `0` and
+an empty offset list, so the row ends `||0|`. An empty field 10 reads as zero, so
+a row ending `|||` loads the same way.
+
 Extra fields beyond 11 are ignored, so a file written by a future version still
 loads.
 
@@ -223,7 +227,7 @@ is always module-rooted; a manually entered one need not be. The module-rooted
 form is stored relative to its module so it survives ASLR:
 
 ```
-entry|2|0|i32|0|Score|Stats||||helper.exe|3040|10,8
+entry|2|0|i32|0|Score|Stats|||helper.exe|3040|10,8
 ```
 
 means: find `helper.exe` in the target, add `0x3040` to get the chain root, read
@@ -238,7 +242,7 @@ An **empty** offset list is not malformed. It means "the base itself, with no
 dereferencing", which is how a static address is written down:
 
 ```
-entry|3|0|i32|0|Ammo|Stats||||helper.exe|3040|
+entry|3|0|i32|0|Ammo|Stats|||helper.exe|3040|
 ```
 
 is `helper.exe+0x3040`, re-resolved every run. Manual entry produces these; the
