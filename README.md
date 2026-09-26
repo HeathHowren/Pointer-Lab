@@ -4,17 +4,29 @@
 
 # Pointer Lab
 
-A Windows x64 user-mode memory research tool built in C++20 with a Dear ImGui dockspace UI.
+A free, open-source memory scanner and debugger for Windows, for 32- and 64-bit
+targets.
 
-![Pointer Lab](docs/screenshot.png)
+[![CI](https://github.com/HeathHowren/Pointer-Lab/actions/workflows/ci.yml/badge.svg)](https://github.com/HeathHowren/Pointer-Lab/actions/workflows/ci.yml)
 
-*Attached to the bundled test helper, after an exact scan for a known i32. The
-memory view shows the same address: `34 12 FE 5A` is `0x5AFE1234` little-endian.*
+![Pointer Lab attached to PointerLabTutorial.exe: eight results of an exact scan for 1000, four of them green static addresses, four tracked in the address list with one frozen, and the pointer scanner reporting 427 chains](docs/screenshot.png)
 
-Pointer Lab attaches to a running 64-bit process, searches its memory for values,
-tracks the addresses it finds, and lets you read, write, freeze, disassemble and
-patch them. It is a research and learning tool — see
+*One session, start to finish. Attached to the bundled tutorial, an exact scan
+for `1000` narrowed to eight hits; the green ones are static, inside a loaded
+module at the same `module+offset` every run. Four are tracked below, one
+frozen, and the pointer scanner has found 427 chains that reach the first.*
+
+Pointer Lab attaches to a running process, 32- or 64-bit, searches its memory
+for values, tracks the addresses it finds, and lets you read, write, freeze,
+disassemble and patch them. It is a research and learning tool — see
 [Intended use](#intended-use) before pointing it at anything.
+
+Pointer Lab is written by Heath Howren
+([Cyborg Elf](https://www.youtube.com/c/cyborgelf)) of
+[Game Reversal Club](https://gamereversal.club) as a companion tool to
+[*The Game Hacker's Handbook*](https://gamereversal.club/books/game-hackers-handbook/).
+Its page on the club's site is
+[gamereversal.club/tools/pointer-lab](https://gamereversal.club/tools/pointer-lab/).
 
 ## Download
 
@@ -74,6 +86,40 @@ instruction passes. Steps 6 and 7 move the object before checking, so an address
 found by scanning is dead by then. Step 9 damages two objects through one
 instruction and reads back immediately, so neither a freeze nor a NOP passes —
 only code that looks at which object is being written to.
+
+## Screenshots
+
+**The MCP server, mid-session.** Everything in these screenshots was done by an
+agent over this connection: the attach, the scan, the address list, the pointer
+scan, and the screenshots themselves. The token shown is already dead; a new one
+is generated every time the server starts, and it is never written to disk.
+
+![The MCP Server panel listening on 127.0.0.1:8722, with the address, session token, a copy-registration-command button and a log of tool calls made by an agent](docs/screenshot-mcp.png)
+
+**The address list.** Descriptions, groups and types, with the current value
+re-read on a timer. A ticked freeze box is written back twenty times a second.
+
+![The address list tracking four addresses in a group called tutorial, each with a description, type and current value, the first frozen](docs/screenshot-address-list.png)
+
+**427 chains to one address.** A heap address is different every run; a chain
+from a module is not. Each row is a base plus offsets that lands on the value.
+
+![The pointer scanner after a completed scan, listing 427 chains by module, base expression and the address each resolves to now](docs/screenshot-pointer-scanner.png)
+
+**The patch list.** It keeps the bytes that were there before, here a
+`lea rcx`, so a patch can be unticked and put back. The patch is padded with
+nops to cover whole instructions.
+
+![The patches panel showing one applied patch: the replaced lea rcx instruction and the bytes written over it, padded with nops](docs/screenshot-patches.png)
+
+**The speed hack at 2.00x.** It rebases the clocks the program reads, and it
+reports how many imports it redirected, so a target that asks the time some
+other way shows up as zero rather than as a silent no-op.
+
+![The speed panel showing a hooked target running at 2.00x with 56 imports redirected, and the trainer export form below it](docs/screenshot-speed.png)
+
+*Captured from 3.1.0. 3.2.0 renamed no panel, menu path or tool that they
+show.*
 
 ## Features
 
@@ -171,6 +217,9 @@ only code that looks at which object is being written to.
   `check` compiles without writing anything; `aobscanmodule` refuses a pattern
   that matches twice rather than picking the first; a run that fails part-way
   rolls back rather than leaving the target half injected.
+  [Signature Lab](https://github.com/HeathHowren/Signature-Lab), the companion
+  x64dbg plugin, prints a ready `aobscanmodule(...)` line for any instruction you
+  select in x64dbg.
 - **Speed hack** — 0.1x to 5x from a preset, or anything between 0.05x and 20x
   from the slider. A game does not measure time; it asks Windows what time it is
   and multiplies everything it does that frame by how much has passed. So this is
