@@ -40,7 +40,7 @@ target that you do.
 
 ## Connecting
 
-Open **View → MCP Server**, press **Start server**, and press **Copy claude mcp
+Open **Tools → MCP Server**, press **Start server**, and press **Copy claude mcp
 add command**. That puts a complete registration command on the clipboard:
 
 ```

@@ -269,7 +269,7 @@ saved by 3.0.0 opens unchanged. What is new is a second way to drive the tool.
   way there is one session, and the MCP panel's request log says what was done to
   it.
 
-  Off until you start it, in **View → MCP Server**. `--mcp [port]` starts it at
+  Off until you start it, in **Tools → MCP Server**. `--mcp [port]` starts it at
   launch for someone who runs Pointer Lab in order to hand it to an agent. The
   panel hands over a ready-made `claude mcp add` command, because assembling the
   bearer-token header by hand is where this goes wrong.

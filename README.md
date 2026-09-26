@@ -268,7 +268,7 @@ show.*
   it, rather than an agent working blind alongside you. See
   [docs/mcp-api.md](docs/mcp-api.md).
 
-  It is **off until you start it** in View → MCP Server, binds `127.0.0.1` only,
+  It is **off until you start it** in Tools → MCP Server, binds `127.0.0.1` only,
   and requires a per-session bearer token. Read the next sentence before you use
   it: while the server is running, a client holding that token can read and write
   the target's memory, patch its code, allocate, inject a DLL and start threads
