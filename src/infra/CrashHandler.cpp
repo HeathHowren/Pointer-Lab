@@ -118,7 +118,10 @@ bool writeDumpOnOwnThread(EXCEPTION_POINTERS* exceptionInfo, DWORD threadId, MIN
     return g_request.written;
 }
 
-bool writeMinidump(EXCEPTION_POINTERS* exceptionInfo, DWORD& error) {
+// `firstError` is left at zero when the dump was written with its exception
+// record, and otherwise holds why the attempts that carried one failed.
+bool writeMinidump(EXCEPTION_POINTERS* exceptionInfo, DWORD& error, DWORD& firstError) {
+    firstError = 0;
     if (g_dumpPath[0] == L'\0') {
         error = ERROR_PATH_NOT_FOUND;
         return false;
@@ -142,7 +145,21 @@ bool writeMinidump(EXCEPTION_POINTERS* exceptionInfo, DWORD& error) {
     // needs no walk, so start the file again as one rather than keep a partial
     // dump nobody is told to send. A stack-only dump is much less than the full
     // one and much more than nothing.
-    return writeDumpOnOwnThread(exceptionInfo, crashedThread, MiniDumpNormal, error);
+    if (writeDumpOnOwnThread(exceptionInfo, crashedThread, MiniDumpNormal, error)) {
+        return true;
+    }
+    if (exceptionInfo == nullptr) {
+        return false;
+    }
+
+    // Both attempts above carry the exception record, and for an uncaught C++
+    // throw (code 0xE06D7363) DbgHelp has been seen on CI runners to fail both
+    // with ERROR_INVALID_USER_BUFFER, never for any other exception code.
+    // Without the record the dump still holds the crashing thread's stack -- it
+    // is parked right here, inside the filter -- so drop the record rather than
+    // the dump.
+    firstError = error;
+    return writeDumpOnOwnThread(nullptr, crashedThread, MiniDumpNormal, error);
 }
 
 // Deliberately uses the raw Win32 file API rather than the Logger: the Logger
@@ -212,9 +229,15 @@ void report(const wchar_t* what, EXCEPTION_POINTERS* exceptionInfo) {
     bool logged = appendCrashLine(log, line);
 
     DWORD dumpError{};
-    const bool dumped = writeMinidump(exceptionInfo, dumpError);
-    if (dumped) {
+    DWORD recordError{};
+    const bool dumped = writeMinidump(exceptionInfo, dumpError, recordError);
+    if (dumped && recordError == 0) {
         logged = appendCrashLine(log, "minidump written\r\n") && logged;
+    } else if (dumped) {
+        char written[128]{};
+        std::snprintf(written, sizeof(written),
+                      "minidump written without the exception record (error 0x%08lX with it)\r\n", recordError);
+        logged = appendCrashLine(log, written) && logged;
     } else {
         // The reason travels with the failure. Without it a report like this
         // one says only that something went wrong, and the next person to see
@@ -291,7 +314,8 @@ void CrashHandler::install(bool interactive) {
 
 bool CrashHandler::writeDumpNow() {
     DWORD ignored{};
-    return writeMinidump(nullptr, ignored);
+    DWORD ignoredRecord{};
+    return writeMinidump(nullptr, ignored, ignoredRecord);
 }
 
 } // namespace ire::infra
